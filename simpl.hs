@@ -12,13 +12,13 @@ import Data.Maybe
 
 -- Utilities.
 
-type Env a = [(Ident, a)]
+type Env a b = [(a, b)]
 
-getEnv :: Env a -> Ident -> Either String a
-getEnv [] var = Left $ "unknown variable: " ++ var
+getEnv :: (Show a, Eq a) => Env a b -> a -> Either String b
+getEnv [] var = Left $ "unknown variable: " ++ show var
 getEnv ((x,v):rest) var = if x == var then Right v else getEnv rest var
 
-putEnv :: Env a -> Ident -> a -> Env a
+putEnv :: Env a b -> a -> b -> Env a b
 putEnv env var val = (var,val):env
 
 
@@ -60,7 +60,7 @@ type Program = Command
 
 -- Concrete interpreter.
 
-type CEnv = Env Int
+type CEnv = Env Ident Int
 
 evalAExp :: AExp -> CEnv -> Either String Int
 evalAExp e env = case e of
