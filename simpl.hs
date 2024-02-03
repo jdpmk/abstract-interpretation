@@ -160,6 +160,39 @@ evalProgram p = do
         Left error -> Just error
         Right _    -> Nothing
 
+
+-- Abstract domains.
+
+--
+-- Typeclass representing a partial order.
+--
+-- We use le, eq, and ge to avoid ambiguity with functions such as (<=) from
+-- the Data.Ord typeclass.
+--
+-- See:
+-- * https://en.wikipedia.org/wiki/Partially_ordered_set
+class PartialOrd a where
+    -- Less-than-or-equal-to relation.
+    le :: a -> a -> Bool
+    -- Equal-to relation.
+    eq :: a -> a -> Bool
+    eq x y = le x y && le y x
+    -- Greater-than-or-equal-to relation.
+    ge :: a -> a -> Bool
+    ge x y = not (le x y) || eq x y
+
+--
+-- Typeclass representing a lattice.
+--
+-- See:
+-- * https://en.wikipedia.org/wiki/Lattice_(order)
+class PartialOrd a => Lattice a where
+    -- Join, or least upper bound.
+    join :: a -> a -> a
+    -- Meet, or greatest lower bound.
+    meet :: a -> a -> a
+
+
 main :: IO ()
 main = do
     -- Hypothetical syntax:
