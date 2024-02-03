@@ -1,32 +1,38 @@
 --
--- Simple IMperative Programming Language
--- ~      ~~         ~           ~
+-- Abstract interpretation for simpl (Simple IMperative Programming Language)
+--                                    ~      ~~         ~           ~
 -- 
--- A simple programming language consisting of basic imperative constructs,
+-- simpl is a programming language consisting of basic imperative constructs,
 -- including loops, conditionals, and arithmetic and boolean expressions.
+--
+-- Joydeep Mukherjee, 2024
+--
 
 
-import Control.Monad
-import Data.Maybe
+import qualified Control.Monad as Monad
+import qualified Data.Maybe as Maybe
+import qualified Data.Either as Either
 
 
 -- Utilities.
 
+-- An environment mapping keys to values, implemented as an associative array.
 type Env a b = [(a, b)]
 
 getEnv :: (Show a, Eq a) => Env a b -> a -> Either String b
-getEnv [] k = Left $ "unknown variable: " ++ show k
+getEnv [] k = Left $ "unknown key: " ++ show k
 getEnv ((x, v):rest) k = if x == k then Right v else getEnv rest k
 
 putEnv :: (Eq a) => Env a b -> a -> b -> Env a b
 putEnv env k v = (k, v):(filter (\(x, _) -> x /= k) env)
 
+-- A wrapper around an environment keyed on identifiers, the primary use case
+-- for environments in this program.
+type Ident = String
 type IEnv a = Env Ident a
 
 
 -- Abstract syntax tree.
-
-type Ident = String
 
 data AExp
     = ALiteral Int
@@ -197,6 +203,10 @@ class PartialOrd a => Lattice a where
 --
 -- Abstract domain of signs.
 --
+-- The domain of signs is simple: we map variables (numbers) to a value
+-- indicating their sign. An application of this abstract domain is proving
+-- the absence of a division-by-0.
+--
 --  .----- Top -----.
 --  |       |       |
 -- Neg    Zero     Pos
@@ -205,19 +215,17 @@ class PartialOrd a => Lattice a where
 --
 data Sign = STop | SPos | SZero | SNeg | SBot deriving Show
 
-instance PartialOrd Sign
-  where
+instance PartialOrd Sign where
     le x y = case (x, y) of
-        (_, STop) -> True
-        (SBot, _) -> True
-        (SPos, SPos) -> True
+        (_, STop)      -> True
+        (SBot, _)      -> True
+        (SPos, SPos)   -> True
         (SZero, SZero) -> True
-        (SNeg, SNeg) -> True
-        (_, _)    -> False
+        (SNeg, SNeg)   -> True
+        (_, _)         -> False
 
 -- TODO: Can we enforce commutativity within the typeclass?
-instance Lattice Sign
-  where
+instance Lattice Sign where
     join x y = case (x, y) of
         (x, y) | eq x y -> x
         (_, STop)       -> STop
@@ -235,13 +243,13 @@ instance Lattice Sign
         (_, _)          -> SBot
 
 
-
 -- Abstract interpreter.
 
 mergeEnv :: (Lattice a) => (a -> a -> a) -> IEnv a -> IEnv a -> IEnv a
 mergeEnv f env1 env2 = foldr (mergeMapping f env1) [] env2
   where
-    mergeMapping :: (Lattice a) => (a -> a -> a) -> IEnv a -> (Ident, a) -> IEnv a -> IEnv a
+    mergeMapping :: (Lattice a)
+                 => (a -> a -> a) -> IEnv a -> (Ident, a) -> IEnv a -> IEnv a
     mergeMapping f env1 (var, aval) acc =
         let joined = case getEnv env1 var of
                             Left _ -> aval
@@ -249,24 +257,38 @@ mergeEnv f env1 env2 = foldr (mergeMapping f env1) [] env2
         in (var, joined):acc
 
 joinEnv :: (Lattice a) => IEnv a -> IEnv a -> IEnv a
-joinEnv = mergeEnv Main.join
+joinEnv = mergeEnv join
 
 meetEnv :: (Lattice a) => IEnv a -> IEnv a -> IEnv a
 meetEnv = mergeEnv meet
 
+type IEnvOrError a = Either String (IEnv a)
 class Lattice a => AbstractDomain a where
     aEvalAExp :: (Lattice a) => AExp -> IEnv a -> Either String a
-    aEvalBExp :: (Lattice a) => BExp -> IEnv a -> Bool -> Either String (IEnv a)
-    aEvalCommand :: (Lattice a) => Command -> IEnv a -> Either String (IEnv a)
+    aEvalBExp :: (Lattice a) => BExp -> IEnv a -> Bool -> IEnvOrError a
+    aEvalCommand :: (Lattice a) => Command -> IEnv a -> IEnvOrError a
 
 instance AbstractDomain Sign where
     aEvalAExp e env = case e of
+        -- Evaluation of a literal is simple: from the value, we can easily
+        -- deduce whether the literal is negative, zero, or positive.
         ALiteral val ->
             Right $ if val < 0 then SNeg
                     else if val == 0 then SZero
                     else SPos
+        -- We look up variables in the current abstract environment.
         Variable var ->
             getEnv env var
+        -- For binary arithmetic operations, we can deduce the sign of the
+        -- result in many cases. For instance, we know that the addition of
+        -- any two positive numbers is always positive, the subtraction of
+        -- a positive number from a negative number is always negative, and so
+        -- on. Zero is also a nice "identity" in many cases.
+        --
+        -- However this isn't perfect. For instance, we don't know for certain
+        -- what the resulting sign of the addition of a positive and negative
+        -- number is. Depending on the magnitude of the numbers, the result
+        -- could be negative, zero, or positive. In such cases, we use STop.
         Add e1 e2 -> do
             a1 <- aEvalAExp e1 env
             a2 <- aEvalAExp e2 env
@@ -308,8 +330,9 @@ instance AbstractDomain Sign where
             Right $ case (a1, a2) of
                 (SBot, _)    -> SBot
                 (_, SBot)    -> SBot
+                (_, STop)    -> SBot  -- Possible (not certain) division by 0
+                (_, SZero)   -> SBot  -- Division by 0
                 (SZero, _)   -> SZero
-                (_, SZero)   -> SBot  -- Division by zero!
                 (SPos, SPos) -> SPos
                 (SNeg, SNeg) -> SPos
                 (SPos, SNeg) -> SNeg
@@ -321,8 +344,9 @@ instance AbstractDomain Sign where
             Right $ case (a1, a2) of
                 (SBot, _)    -> SBot
                 (_, SBot)    -> SBot
+                (_, STop)    -> SBot  -- Possible (not certain) division by 0
+                (_, SZero)   -> SBot  -- Division by 0
                 (SZero, _)   -> SZero
-                (_, SZero)   -> SBot  -- Division by zero!
                 (SPos, SPos) -> SPos
                 (SNeg, SNeg) -> SPos
                 (SPos, SNeg) -> SNeg  -- TODO: Revisit these semantics.
@@ -330,10 +354,31 @@ instance AbstractDomain Sign where
                 (_, _)       -> STop
 
     aEvalBExp e env flipped = case e of
+        -- A literal boolean expression will not affect the abstract
+        -- environment.
         BLiteral _ ->
             Right env
+        -- We toggle the flipped flag when performing negation. Effectively,
+        -- this is used to emulate DeMorgan's law "locally" at the other
+        -- binary operations (e.g. Or, Lt, etc).
         Not b ->
             aEvalBExp b env (not flipped)
+        -- When performing conjunction/disjunction, we evaluate the
+        -- subexpressions, and then perform either the meet or join of the
+        -- resulting environments.
+        --
+        -- For disjunction, we broaden the possible values that can be taken
+        -- on, for example, in "x > 5 || x = 0". In this case, "x" may be SPos
+        -- when it is greater than 5, or SZero, when it is equal to 0. So,
+        -- taking the join of SPos and SZero yields STop, which is the most
+        -- precise abstract value we can use here.
+        --
+        -- Conjunction is similar, but we narrow the possible values that can
+        -- be taken on, for example, in "x >= 0 && x = 0". In this case, "x"
+        -- may be STop when greater than or equal to 0, and SZero when equal
+        -- to 0. Taking the meet of these abstract values yields is SZero,
+        -- which is the most precise abstract value we can use here. This also
+        -- makes sense logically: x >= 0 && x = 0 implies x = 0.
         Or b1 b2 -> do
             env1 <- aEvalBExp b1 env flipped
             env2 <- aEvalBExp b2 env flipped
@@ -342,11 +387,33 @@ instance AbstractDomain Sign where
             env1 <- aEvalBExp b1 env flipped
             env2 <- aEvalBExp b2 env flipped
             Right $ (if flipped then joinEnv else meetEnv) env1 env2
+        -- Boolean comparison operators provide a chance to further refine
+        -- our abstract environment. For instance, suppose we have a boolean
+        -- guard like:
+        --
+        --   if x = 0 then
+        --       ...
+        --
+        -- The evaluation of the "x" will result in its current abstract value.
+        -- We can discard this. The evaluation of the literal '0' will result
+        -- in SZero. We want to detect this and update our abstract state for
+        -- "x". In this case, we map "x" to SZero.
+        --
+        -- Technically, the guard can also be written as:
+        --
+        --   if 0 = x then
+        --       ...
+        --
+        -- so we need to check whether EITHER side is a variable, not just the
+        -- left-hand side.
         Eq e1 e2 -> do
             a1 <- aEvalAExp e1 env
             a2 <- aEvalAExp e1 env
             Right $ case e1 of
                 Variable var -> putEnv env var a2
+                -- TODO: We should also check if e2 is a variable. Suppose the
+                -- guard is: if x = y. "y" may have a more precise abstract
+                -- mapping that we want to update "x" with.
                 _  -> case e2 of
                     Variable var -> putEnv env var a1
                     _  -> env
@@ -362,7 +429,7 @@ instance AbstractDomain Sign where
                     _  -> case e2 of
                         Variable var -> putEnv env var (deduceGreater a1)
                         _  -> env
-        Gt e1 e2 -> do
+        Gt e1 e2 ->
             if flipped then
                 aEvalBExp (Or (Lt e1 e2) (Eq e1 e2)) env (not flipped)
             else do
@@ -375,20 +442,27 @@ instance AbstractDomain Sign where
                         Variable var -> putEnv env var (deduceLess a1)
                         _  -> env
       where
+        -- These are used to deduce an abstract value for a variable under
+        -- certain conditions. For example,
+        --
+        --   if x < 0: then, 0 -> SZero, and we can deduce x should be SNeg
+        --   if x > 0: then, 0 -> SZero, and we can deduce x should be SPos
+        --   if x > 5: then, 5 -> SPos, and we can deduce x should be SPos
+        --
+        -- This doesn't work all the time, for example,
+        --
+        --   if x < 5: then, 3 -> SPos, but we can't say anything too precise
+        --   about "x". It could be negative, zero, or positive.
         deduceLess :: Sign -> Sign
         deduceLess a = case a of
-            SBot  -> SBot
             SZero -> SNeg
-            SNeg  -> SNeg
             SPos  -> STop
-            STop  -> STop
+            _     -> a
         deduceGreater :: Sign -> Sign
         deduceGreater a = case a of
-            SBot  -> SBot
             SZero -> SPos
             SNeg  -> STop
-            SPos  -> SPos
-            STop  -> STop
+            _     -> a
 
     aEvalCommand c env = case c of
         Skip ->
@@ -397,12 +471,24 @@ instance AbstractDomain Sign where
             env'  <- aEvalCommand c1 env
             env'' <- aEvalCommand c2 env'
             Right env''
+        -- Our abstract interpreter differs from our concrete interpreter in
+        -- the fact that we are interested in exploring both branches of
+        -- conditionals, not just the one for which the guard is satisfied.
+        -- So we must evaluate the guard and its negation, and evaluate each
+        -- branch with its respective environment, exhausting cases in which
+        -- the guard was satisfied and unsatisfied. After evaluating both
+        -- branches, we perform the join of the resulting environments.
+        -- Intuitively, this is like the "summation" of all the information
+        -- we have gathered from the branches. Suppose two different executions
+        -- of the program result in two different branches taken. We want to
+        -- obtain an abstract value which encapsulates both (all) executions.
         If guard c1 c2 -> do
-            envt <- aEvalBExp guard env False
-            envf <- aEvalBExp (Not guard) env False
-            env1 <- aEvalCommand c1 envt
-            env2 <- aEvalCommand c2 envf
+            env_sat <- aEvalBExp guard env False
+            env_unsat <- aEvalBExp (Not guard) env False
+            env1 <- aEvalCommand c1 env_sat
+            env2 <- aEvalCommand c2 env_unsat
             Right $ joinEnv env1 env2
+        -- TODO: Implement while.
         While _ _ ->
             undefined
         Assign var e -> do
@@ -411,27 +497,75 @@ instance AbstractDomain Sign where
         Print _ ->
             Right env
 
-signEvalProgram :: Program -> IO (Maybe (IEnv Sign))
-signEvalProgram p = do
-    let env' = aEvalCommand p ([] :: IEnv Sign)
-    return $ case env' of
-        Left _    -> Nothing
-        Right env -> Just env
+signEvalProgram :: Program -> Maybe (IEnv Sign)
+signEvalProgram p =
+    Either.either (const Nothing) Just $ aEvalCommand p []
 
 abstractMain :: IO ()
 abstractMain = do
-    let commands = [ Assign "x" (ALiteral 0)
-                   , If (Lt (Variable "x") (ALiteral 0))
-                        (Assign "x" (Mult (Variable "x") (ALiteral (-1))))
-                        (Assign "x" (ALiteral 1))
-                   ]
-    let p = foldr (Seq) Skip commands
-    env <- signEvalProgram p
-    when (isJust env) $ putStrLn $ show $ fromJust env
+    --
+    -- At the end of the following example, we can statically assert that the
+    -- value of "x" is positive.
+    --
+    -- x := 0;           | x -> STop
+    -- if x < 0 then     | x -> SNeg
+    --     x := x * -1;  | x -> SPos
+    -- else              | x -> STop
+    --     x := 1        | x -> SPos
+    -- end               | x -> SPos
+    --
+    evaluate [ Assign "x" (ALiteral 0)
+             , If (Lt (Variable "x") (ALiteral 0))
+                  (Assign "x" (Mult (Variable "x") (ALiteral (-1))))
+                  (Assign "x" (ALiteral 1))
+             ]
+    --
+    -- At the end of the following example, we can statically assert that we
+    -- will certainly not have a division by 0.
+    --
+    -- x := 0;          | x -> SZero
+    -- y := 5;          | x -> SZero, y -> SPos
+    -- if x > 0 then    | x -> SPos, y -> SPos
+    --     y := y / x;  | x -> SPos, y -> SPos
+    -- else             | x -> STop, y -> SPos
+    --     y := 1       | x -> STop, y -> SPos
+    -- end              | x -> STop, y -> SPos
+    --
+    evaluate [ Assign "x" (ALiteral 0)
+             , Assign "y" (ALiteral 5)
+             , If (Gt (Variable "x") (ALiteral 0))
+                  (Assign "y" (Div (Variable "y") (Variable "x")))
+                  (Assign "y" (ALiteral 1))
+             ]
+    --
+    -- We may encounter division by 0 when "x" is 0. At the point where we
+    -- perform the division, we should set "y" to SBot. At the end of the
+    -- program, we perform the join of SBot and SNeg and "y" is set to SNeg.
+    --
+    -- x := 0;                | x -> SZero
+    -- y := 5;                | x -> SZero, y -> SPos
+    -- if x > 0 or x = 0 then | x -> STop, y -> SPos   TODO: maybe here we can
+    --                                                 deduce that x = 0?
+    --     y := y / x;        | x -> STop, y -> SNeg
+    -- else                   | x -> SNeg, y -> SPos
+    --     y := -1            | x -> SNeg, y -> SPos
+    -- end                    | x -> STop, y -> SPos
+    --
+    evaluate [ Assign "x" (ALiteral 0)
+             , Assign "y" (ALiteral 5)
+             , If (Or (Gt (Variable "x") (ALiteral 0))
+                      (Eq (Variable "x") (ALiteral 0)))
+                  (Assign "y" (Div (Variable "y") (Variable "x")))
+                  (Assign "y" (ALiteral (-1)))
+             ]
+  where
+    evaluate commands = do
+        let p = foldr (Seq) Skip commands
+        let env = signEvalProgram p
+        Monad.when (Maybe.isJust env) $ putStrLn $ show $ Maybe.fromJust env
 
 concreteMain :: IO ()
 concreteMain = do
-    -- Hypothetical syntax:
     --
     -- x := 42;
     -- while !(x = 1) do
@@ -440,8 +574,10 @@ concreteMain = do
     --         x := x / 2;
     --     else
     --         x := 3 * x + 1;
+    --     end
     -- end
     -- print x;
+    --
     let commands = 
          [ Assign "x" (ALiteral 42)
          , While (Not (Eq (Variable "x") (ALiteral 1)))
@@ -464,4 +600,4 @@ concreteMain = do
     -- 2
     -- 1
     error <- evalProgram p
-    when (isJust error) $ putStrLn (fromJust error)
+    Monad.when (Maybe.isJust error) $ putStrLn (Maybe.fromJust error)
