@@ -192,6 +192,41 @@ class PartialOrd a => Lattice a where
     -- Meet, or greatest lower bound.
     meet :: a -> a -> a
 
+--
+-- Abstract domain of signs.
+--
+--  .----- Top -----.
+--  |       |       |
+-- Neg    Zero     Pos
+--  |       |       |
+--  '----- Bot -----'
+--
+data Sign = STop | SPos | SZero | SNeg | SBot deriving Show
+
+instance PartialOrd Sign
+  where
+    le x y = case (x, y) of
+        (_, STop) -> True
+        (SBot, _) -> True
+        (_, _)    -> False
+
+-- TODO: Can we enforce commutativity within the typeclass?
+instance Lattice Sign
+  where
+    join x y = case (x, y) of
+        (_, STop) -> STop
+        (STop, _) -> STop
+        (SBot, x) -> x
+        (x, SBot) -> x
+        (_, _)    -> STop
+
+    meet x y = case (x, y) of
+        (x, STop) -> x
+        (STop, x) -> x
+        (SBot, _) -> SBot
+        (_, SBot) -> SBot
+        (_, _)    -> SBot
+
 
 main :: IO ()
 main = do
