@@ -235,8 +235,28 @@ instance Lattice Sign
         (_, _)          -> SBot
 
 
+
+-- Abstract interpreter.
+
+mergeEnv :: (Lattice a) => (a -> a -> a) -> IEnv a -> IEnv a -> IEnv a
+mergeEnv f env1 env2 = foldr (mergeMapping f env1) [] env2
+  where
+    mergeMapping :: (Lattice a) => (a -> a -> a) -> IEnv a -> (Ident, a) -> IEnv a -> IEnv a
+    mergeMapping f env1 (var, aval) acc =
+        let joined = case getEnv env1 var of
+                            Left _ -> aval
+                            Right aval1 -> f aval1 aval
+        in (var, joined):acc
+
+joinEnv :: (Lattice a) => IEnv a -> IEnv a -> IEnv a
+joinEnv = mergeEnv Main.join
+
+meetEnv :: (Lattice a) => IEnv a -> IEnv a -> IEnv a
+meetEnv = mergeEnv meet
+
 class Lattice a => AbstractDomain a where
     aEvalAExp :: (Lattice a) => AExp -> IEnv a -> Either String a
+    aEvalBExp :: (Lattice a) => BExp -> IEnv a -> Bool -> Either String (IEnv a)
     aEvalCommand :: (Lattice a) => Command -> IEnv a -> Either String (IEnv a)
 
 instance AbstractDomain Sign where
@@ -309,6 +329,67 @@ instance AbstractDomain Sign where
                 (SNeg, SPos) -> SNeg  -- TODO: Revisit these semantics.
                 (_, _)       -> STop
 
+    aEvalBExp e env flipped = case e of
+        BLiteral _ ->
+            Right env
+        Not b ->
+            aEvalBExp b env (not flipped)
+        Or b1 b2 -> do
+            env1 <- aEvalBExp b1 env flipped
+            env2 <- aEvalBExp b2 env flipped
+            Right $ (if flipped then meetEnv else joinEnv) env1 env2
+        And b1 b2 -> do
+            env1 <- aEvalBExp b1 env flipped
+            env2 <- aEvalBExp b2 env flipped
+            Right $ (if flipped then joinEnv else meetEnv) env1 env2
+        Eq e1 e2 -> do
+            a1 <- aEvalAExp e1 env
+            a2 <- aEvalAExp e1 env
+            Right $ case e1 of
+                Variable var -> putEnv env var a2
+                _  -> case e2 of
+                    Variable var -> putEnv env var a1
+                    _  -> env
+        Lt e1 e2 ->
+            if flipped then
+                aEvalBExp (Or (Gt e1 e2) (Eq e1 e2)) env (not flipped)
+            else do
+                a1 <- aEvalAExp e1 env
+                a2 <- aEvalAExp e1 env
+                Right $ case e1 of
+                    Variable var ->
+                        putEnv env var (deduceLess a2)
+                    _  -> case e2 of
+                        Variable var -> putEnv env var (deduceGreater a1)
+                        _  -> env
+        Gt e1 e2 -> do
+            if flipped then
+                aEvalBExp (Or (Lt e1 e2) (Eq e1 e2)) env (not flipped)
+            else do
+                a1 <- aEvalAExp e1 env
+                a2 <- aEvalAExp e1 env
+                Right $ case e1 of
+                    Variable var ->
+                        putEnv env var (deduceGreater a2)
+                    _  -> case e2 of
+                        Variable var -> putEnv env var (deduceLess a1)
+                        _  -> env
+      where
+        deduceLess :: Sign -> Sign
+        deduceLess a = case a of
+            SBot  -> SBot
+            SZero -> SNeg
+            SNeg  -> SNeg
+            SPos  -> STop
+            STop  -> STop
+        deduceGreater :: Sign -> Sign
+        deduceGreater a = case a of
+            SBot  -> SBot
+            SZero -> SPos
+            SNeg  -> STop
+            SPos  -> SPos
+            STop  -> STop
+
     aEvalCommand c env = case c of
         Skip ->
             Right env
@@ -316,10 +397,12 @@ instance AbstractDomain Sign where
             env'  <- aEvalCommand c1 env
             env'' <- aEvalCommand c2 env'
             Right env''
-        If _ c1 c2 -> do
-            env1'  <- aEvalCommand c1 env
-            env2'  <- aEvalCommand c1 env
-            Right $ joinEnv env1' env2'
+        If guard c1 c2 -> do
+            envt <- aEvalBExp guard env False
+            envf <- aEvalBExp (Not guard) env False
+            env1 <- aEvalCommand c1 envt
+            env2 <- aEvalCommand c2 envf
+            Right $ joinEnv env1 env2
         While _ _ ->
             undefined
         Assign var e -> do
@@ -327,16 +410,6 @@ instance AbstractDomain Sign where
             Right $ putEnv env var a
         Print _ ->
             Right env
-      where
-        joinEnv :: (Lattice a) => IEnv a -> IEnv a -> IEnv a
-        joinEnv env1 env2 = foldr (joinMapping env1) [] env2
-
-        joinMapping :: (Lattice a) => IEnv a -> (Ident, a) -> IEnv a -> IEnv a
-        joinMapping env1 (var, aval) acc =
-            let joined = case getEnv env1 var of
-                              Left _ -> aval
-                              Right aval1 -> Main.join aval1 aval
-            in (var, joined):acc
 
 signEvalProgram :: Program -> IO (Maybe (IEnv Sign))
 signEvalProgram p = do
@@ -345,19 +418,19 @@ signEvalProgram p = do
         Left _    -> Nothing
         Right env -> Just env
 
-main :: IO ()
-main = do
+abstractMain :: IO ()
+abstractMain = do
     let commands = [ Assign "x" (ALiteral 0)
                    , If (Lt (Variable "x") (ALiteral 0))
                         (Assign "x" (Mult (Variable "x") (ALiteral (-1))))
-                        (Skip)
+                        (Assign "x" (ALiteral 1))
                    ]
     let p = foldr (Seq) Skip commands
     env <- signEvalProgram p
     when (isJust env) $ putStrLn $ show $ fromJust env
 
-main2 :: IO ()
-main2 = do
+concreteMain :: IO ()
+concreteMain = do
     -- Hypothetical syntax:
     --
     -- x := 42;
