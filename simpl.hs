@@ -10,6 +10,18 @@ import Control.Monad
 import Data.Maybe
 
 
+-- Utilities.
+
+type Env a = [(Ident, a)]
+
+getEnv :: Env a -> Ident -> Either String a
+getEnv [] var = Left $ "unknown variable: " ++ var
+getEnv ((x,v):rest) var = if x == var then Right v else getEnv rest var
+
+putEnv :: Env a -> Ident -> a -> Env a
+putEnv env var val = (var,val):env
+
+
 -- Abstract syntax tree.
 
 type Ident = String
@@ -48,17 +60,10 @@ type Program = Command
 
 -- Concrete interpreter.
 
-type Env = [(Ident, Int)]
+type CEnv = Env Int
 
-getEnv :: Env -> Ident -> Either String Int
-getEnv [] var = Left $ "unknown variable: " ++ var
-getEnv ((x,v):rest) var = if x == var then Right v else getEnv rest var
-
-putEnv :: Env -> Ident -> Int -> Env
-putEnv env var val = (var,val):env
-
-evalAExp :: AExp -> Env -> Either String Int
-evalAExp exp env = case exp of
+evalAExp :: AExp -> CEnv -> Either String Int
+evalAExp e env = case e of
     ALiteral val ->
         Right val
     Variable var ->
@@ -84,8 +89,8 @@ evalAExp exp env = case exp of
         e2' <- evalAExp e2 env
         Right $ mod e1' e2'
 
-evalBExp :: BExp -> Env -> Either String Bool
-evalBExp exp env = case exp of
+evalBExp :: BExp -> CEnv -> Either String Bool
+evalBExp e env = case e of
     BLiteral b ->
         Right b
     Not b -> do
@@ -111,7 +116,7 @@ evalBExp exp env = case exp of
         Right $ a1' > a2'
 
 -- TODO: Find a better way to handle IO (Either ...).
-evalCommand :: Command -> Env -> IO (Either String Env)
+evalCommand :: Command -> CEnv -> IO (Either String CEnv)
 evalCommand c env = case c of
     Skip ->
         return $ Right env
