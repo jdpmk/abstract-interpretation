@@ -12,7 +12,7 @@ First, we need the following:
 - [ ] type-checking
 
 Some abstract domains it would be useful to support:
-- [ ] sign
+- [x] sign
 - [ ] parity
 - [ ] intervals
 
