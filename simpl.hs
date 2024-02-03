@@ -507,14 +507,14 @@ abstractMain = do
     -- At the end of the following example, we can statically assert that the
     -- value of "x" is positive.
     --
-    -- x := 0;           | x -> STop
+    -- x := -1;          | x -> SNeg
     -- if x < 0 then     | x -> SNeg
     --     x := x * -1;  | x -> SPos
     -- else              | x -> STop
     --     x := 1        | x -> SPos
     -- end               | x -> SPos
     --
-    evaluate [ Assign "x" (ALiteral 0)
+    evaluate [ Assign "x" (ALiteral (-1))
              , If (Lt (Variable "x") (ALiteral 0))
                   (Assign "x" (Mult (Variable "x") (ALiteral (-1))))
                   (Assign "x" (ALiteral 1))
@@ -523,16 +523,16 @@ abstractMain = do
     -- At the end of the following example, we can statically assert that we
     -- will certainly not have a division by 0.
     --
-    -- x := 0;          | x -> SZero
-    -- y := 5;          | x -> SZero, y -> SPos
+    -- x := 1;          | x -> SPos
+    -- y := 1;          | x -> SZero, y -> SPos
     -- if x > 0 then    | x -> SPos, y -> SPos
     --     y := y / x;  | x -> SPos, y -> SPos
     -- else             | x -> STop, y -> SPos
     --     y := 1       | x -> STop, y -> SPos
     -- end              | x -> STop, y -> SPos
     --
-    evaluate [ Assign "x" (ALiteral 0)
-             , Assign "y" (ALiteral 5)
+    evaluate [ Assign "x" (ALiteral 1)
+             , Assign "y" (ALiteral 1)
              , If (Gt (Variable "x") (ALiteral 0))
                   (Assign "y" (Div (Variable "y") (Variable "x")))
                   (Assign "y" (ALiteral 1))
@@ -546,10 +546,10 @@ abstractMain = do
     -- y := 5;                | x -> SZero, y -> SPos
     -- if x > 0 or x = 0 then | x -> STop, y -> SPos   TODO: maybe here we can
     --                                                 deduce that x = 0?
-    --     y := y / x;        | x -> STop, y -> SNeg
+    --     y := y / x;        | x -> STop, y -> SBot
     -- else                   | x -> SNeg, y -> SPos
-    --     y := -1            | x -> SNeg, y -> SPos
-    -- end                    | x -> STop, y -> SPos
+    --     y := -1            | x -> SNeg, y -> SNeg
+    -- end                    | x -> STop, y -> SNeg
     --
     evaluate [ Assign "x" (ALiteral 0)
              , Assign "y" (ALiteral 5)
