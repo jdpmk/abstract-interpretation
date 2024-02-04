@@ -5,8 +5,6 @@
 -- simpl is a programming language consisting of basic imperative constructs,
 -- including loops, conditionals, and arithmetic and boolean expressions.
 --
--- Joydeep Mukherjee, 2024
---
 
 
 import qualified Control.Monad as Monad
@@ -61,6 +59,7 @@ data Command
     | While BExp Command
     | Assign Ident AExp
     | Print AExp
+    | Input Ident
     deriving Show
 
 type Program = Command
@@ -160,6 +159,10 @@ evalCommand c env = case c of
                 return $ Right env
             Left error ->
                 return $ Left error
+    Input var -> do
+        input <- getLine
+        let input_as_int = read input :: Int
+        return $ Right $ putEnv env var input_as_int
 
 evalProgram :: Program -> IO (Maybe String)
 evalProgram p = do
@@ -207,40 +210,94 @@ class PartialOrd a => Lattice a where
 -- indicating their sign. An application of this abstract domain is proving
 -- the absence of a division-by-0.
 --
---  .----- Top -----.
---  |       |       |
--- Neg    Zero     Pos
---  |       |       |
---  '----- Bot -----'
---
-data Sign = STop | SPos | SZero | SNeg | SBot deriving Show
+data Sign = ST | SZP | SNP | SNZ | SP | SZ | SN | SB deriving Show
 
 instance PartialOrd Sign where
     le x y = case (x, y) of
-        (_, STop)      -> True
-        (SBot, _)      -> True
-        (SPos, SPos)   -> True
-        (SZero, SZero) -> True
-        (SNeg, SNeg)   -> True
-        (_, _)         -> False
+        (_, ST)    -> True
+        (SB, _)    -> True
+        (SZP, SZP) -> True
+        (SNP, SNP) -> True
+        (SNZ, SNZ) -> True
+        (SZ, SZP)  -> True
+        (SP, SZP)  -> True
+        (SN, SNP)  -> True
+        (SP, SNP)  -> True
+        (SN, SNZ)  -> True
+        (SZ, SNZ)  -> True
+        (SP, SP)   -> True
+        (SZ, SZ)   -> True
+        (SN, SN)   -> True
+        (_, _)     -> False
 
 -- TODO: Can we enforce commutativity within the typeclass?
 instance Lattice Sign where
     join x y = case (x, y) of
         (x, y) | eq x y -> x
-        (_, STop)       -> STop
-        (STop, _)       -> STop
-        (SBot, x)       -> x
-        (x, SBot)       -> x
-        (_, _)          -> STop
+        (_, ST) -> ST
+        (ST, _) -> ST
+        (SB, x) -> x
+        (x, SB) -> x
+
+        (SZ, SP) -> SZP
+        (SP, SZ) -> SZP
+
+        (SN, SP) -> SNP
+        (SP, SN) -> SNP
+
+        (SN, SZ) -> SNZ
+        (SZ, SN) -> SNZ
+
+        (SZP, SZ) -> SZP
+        (SZP, SP) -> SZP
+        (SZ, SZP) -> SZP
+        (SP, SZP) -> SZP
+
+        (SNP, SN) -> SNP
+        (SNP, SP) -> SNP
+        (SN, SNP) -> SNP
+        (SP, SNP) -> SNP
+
+        (SNZ, SN) -> SNZ
+        (SNZ, SZ) -> SNZ
+        (SN, SNZ) -> SNZ
+        (SZ, SNZ) -> SNZ
+
+        (_, _) -> ST
 
     meet x y = case (x, y) of
         (x, y) | eq x y -> x
-        (x, STop)       -> x
-        (STop, x)       -> x
-        (SBot, _)       -> SBot
-        (_, SBot)       -> SBot
-        (_, _)          -> SBot
+
+        (x, ST) -> x
+        (ST, x) -> x
+        (SB, _) -> SB
+        (_, SB) -> SB
+
+        (SZP, SNP) -> SP
+        (SNP, SZP) -> SP
+
+        (SZP, SNZ) -> SZ
+        (SNZ, SZP) -> SZ
+
+        (SNP, SNZ) -> SN
+        (SNZ, SNP) -> SN
+
+        (SZP, SZ) -> SZ
+        (SZP, SP) -> SP
+        (SZ, SZP) -> SZ
+        (SP, SZP) -> SP
+
+        (SNP, SN) -> SN
+        (SNP, SP) -> SP
+        (SN, SNP) -> SN
+        (SP, SNP) -> SP
+
+        (SNZ, SN) -> SN
+        (SNZ, SZ) -> SZ
+        (SN, SNZ) -> SN
+        (SZ, SNZ) -> SZ
+
+        (_, _) -> SB
 
 
 -- Abstract interpreter.
@@ -270,88 +327,125 @@ class Lattice a => AbstractDomain a where
 
 instance AbstractDomain Sign where
     aEvalAExp e env = case e of
-        -- Evaluation of a literal is simple: from the value, we can easily
+        -- Evaluation of a literal is simple: from its value, we can easily
         -- deduce whether the literal is negative, zero, or positive.
         ALiteral val ->
-            Right $ if val < 0 then SNeg
-                    else if val == 0 then SZero
-                    else SPos
+            Right $ if val < 0 then SN
+                    else if val == 0 then SZ
+                    else SP
         -- We look up variables in the current abstract environment.
         Variable var ->
             getEnv env var
         -- For binary arithmetic operations, we can deduce the sign of the
-        -- result in many cases. For instance, we know that the addition of
-        -- any two positive numbers is always positive, the subtraction of
-        -- a positive number from a negative number is always negative, and so
-        -- on. Zero is also a nice "identity" in many cases.
-        --
-        -- However this isn't perfect. For instance, we don't know for certain
-        -- what the resulting sign of the addition of a positive and negative
-        -- number is. Depending on the magnitude of the numbers, the result
-        -- could be negative, zero, or positive. In such cases, we use STop.
+        -- result in many cases. For instance, we know that:
+        -- * the addition of any two positive numbers is always positive
+        -- * the subtraction of a positive number from a negative number is
+        --   always negative
+        -- * the addition of a non-negative number and a positive number is
+        --   always positive,
+        -- and so on. Zero is also a nice "identity" in many cases.
         Add e1 e2 -> do
             a1 <- aEvalAExp e1 env
             a2 <- aEvalAExp e2 env
             Right $ case (a1, a2) of
-                (SBot, _)    -> SBot
-                (_, SBot)    -> SBot
-                (SZero, x)   -> x
-                (x, SZero)   -> x
-                (SPos, SPos) -> SPos
-                (_, _)       -> STop
+                (SB, _) -> SB
+                (_, SB) -> SB
+
+                (SZ, x) -> x
+                (x, SZ) -> x
+
+                (SZP, SZP) -> SZP
+                (SZP, SP)  -> SP
+                (SP, SZP)  -> SP
+                (SP, SP)   -> SP
+
+                (SNZ, SNZ) -> SNZ
+                (SNZ, SN)  -> SN
+                (SN, SNZ)  -> SN
+                (SN, SN)   -> SN
+
+                (_, _) -> ST
         Sub e1 e2 -> do
             a1 <- aEvalAExp e1 env
             a2 <- aEvalAExp e2 env
             Right $ case (a1, a2) of
-                (SBot, _)  -> SBot
-                (_, SBot)  -> SBot
-                (SZero, SPos) -> SNeg
-                (SZero, SNeg) -> SPos
-                (x, SZero) -> x
-                (SNeg, SPos) -> SNeg
-                (SPos, SNeg) -> SPos
-                (_, _) -> STop
+                (SB, _) -> SB
+                (_, SB) -> SB
+
+                (x, SZ) -> x
+
+                (SZ, SP)  -> SN
+                (SZ, SN)  -> SP
+                (SZ, SZP) -> SNZ
+                (SZ, SNZ) -> SZP
+                (SZ, SNP) -> SNP
+
+                (_, _) -> ST
         Mult e1 e2 -> do
             a1 <- aEvalAExp e1 env
             a2 <- aEvalAExp e2 env
             Right $ case (a1, a2) of
-                (SBot, _)    -> SBot
-                (_, SBot)    -> SBot
-                (SZero, _)   -> SZero
-                (_, SZero)   -> SZero
-                (SPos, SPos) -> SPos
-                (SNeg, SNeg) -> SPos
-                (SPos, SNeg) -> SNeg
-                (SNeg, SPos) -> SNeg
-                (_, _)       -> STop
+                (SB, _) -> SB
+                (_, SB) -> SB
+
+                (SZ, _) -> SZ
+                (_, SZ) -> SZ
+
+                (SP, SP) -> SP
+                (SN, SN) -> SP
+                (SP, SN) -> SP
+                (SN, SP) -> SN
+
+                (SZP, SZP) -> SZP
+                (SZP, SNZ) -> SNZ
+                (SNZ, SZP) -> SNZ
+
+                (_, _) -> ST
         Div e1 e2 -> do
             a1 <- aEvalAExp e1 env
             a2 <- aEvalAExp e2 env
             Right $ case (a1, a2) of
-                (SBot, _)    -> SBot
-                (_, SBot)    -> SBot
-                (_, STop)    -> SBot  -- Possible (not certain) division by 0
-                (_, SZero)   -> SBot  -- Division by 0
-                (SZero, _)   -> SZero
-                (SPos, SPos) -> SPos
-                (SNeg, SNeg) -> SPos
-                (SPos, SNeg) -> SNeg
-                (SNeg, SPos) -> SNeg
-                (_, _)       -> STop
+                (SB, _) -> SB
+                (_, SB) -> SB
+
+                -- Possible division by zero.
+                -- "le SZ x" means "any state which may be zero".
+                (_, x) | le SZ x -> SB
+
+                (SZ, _) -> SZ
+
+                (x, SP) -> x
+
+                (SP, SN) -> SN
+                (SN, SN) -> SP
+                (SZP, SN) -> SNZ
+                (SNP, SN) -> SNP
+                (SNZ, SN) -> SZP
+
+                (_, _) -> ST
         Mod e1 e2 -> do
             a1 <- aEvalAExp e1 env
             a2 <- aEvalAExp e2 env
             Right $ case (a1, a2) of
-                (SBot, _)    -> SBot
-                (_, SBot)    -> SBot
-                (_, STop)    -> SBot  -- Possible (not certain) division by 0
-                (_, SZero)   -> SBot  -- Division by 0
-                (SZero, _)   -> SZero
-                (SPos, SPos) -> SPos
-                (SNeg, SNeg) -> SPos
-                (SPos, SNeg) -> SNeg  -- TODO: Revisit these semantics.
-                (SNeg, SPos) -> SNeg  -- TODO: Revisit these semantics.
-                (_, _)       -> STop
+                (SB, _) -> SB
+                (_, SB) -> SB
+
+                -- Possible division by zero.
+                -- "le SZ x" means "any state which may be zero".
+                (_, x) | le SZ x -> SB
+
+                (SZ, _) -> SZ
+
+                (x, SP) -> x
+
+                -- TODO: Revisit these semantics.
+                (SP, SN) -> SN
+                (SN, SN) -> SP
+                (SZP, SN) -> SNZ
+                (SNP, SN) -> SNP
+                (SNZ, SN) -> SZP
+
+                (_, _) -> ST
 
     aEvalBExp e env flipped = case e of
         -- A literal boolean expression will not affect the abstract
@@ -368,17 +462,18 @@ instance AbstractDomain Sign where
         -- resulting environments.
         --
         -- For disjunction, we broaden the possible values that can be taken
-        -- on, for example, in "x > 5 || x = 0". In this case, "x" may be SPos
-        -- when it is greater than 5, or SZero, when it is equal to 0. So,
-        -- taking the join of SPos and SZero yields STop, which is the most
-        -- precise abstract value we can use here.
+        -- on, for example, in "x > 5 || x = 0". In this case, "x" is SP when
+        -- it is greater than 5, or SZ, when it is equal to 0. So, taking the
+        -- join of SP and SZ yields SZP, which is the most precise abstract
+        -- value we can use here, i.e., after this condition we know that "x"
+        -- must be zero or positive.
         --
         -- Conjunction is similar, but we narrow the possible values that can
         -- be taken on, for example, in "x >= 0 && x = 0". In this case, "x"
-        -- may be STop when greater than or equal to 0, and SZero when equal
-        -- to 0. Taking the meet of these abstract values yields is SZero,
-        -- which is the most precise abstract value we can use here. This also
-        -- makes sense logically: x >= 0 && x = 0 implies x = 0.
+        -- may be SZP when greater than or equal to 0, and SZ when equal to 0.
+        -- Taking the meet of these abstract values yields is SZ, which is the
+        -- most precise abstract value we can use here. This also makes sense
+        -- logically: x >= 0 && x = 0 implies x = 0.
         Or b1 b2 -> do
             env1 <- aEvalBExp b1 env flipped
             env2 <- aEvalBExp b2 env flipped
@@ -396,8 +491,8 @@ instance AbstractDomain Sign where
         --
         -- The evaluation of the "x" will result in its current abstract value.
         -- We can discard this. The evaluation of the literal '0' will result
-        -- in SZero. We want to detect this and update our abstract state for
-        -- "x". In this case, we map "x" to SZero.
+        -- in SZ. We want to detect this and update our abstract state for
+        -- "x". In this case, we map "x" to SZ.
         --
         -- Technically, the guard can also be written as:
         --
@@ -408,21 +503,21 @@ instance AbstractDomain Sign where
         -- left-hand side.
         Eq e1 e2 -> do
             a1 <- aEvalAExp e1 env
-            a2 <- aEvalAExp e1 env
+            a2 <- aEvalAExp e2 env
             Right $ case e1 of
-                Variable var -> putEnv env var a2
+                Variable var -> putEnv env var (deduceEq a2 flipped)
                 -- TODO: We should also check if e2 is a variable. Suppose the
                 -- guard is: if x = y. "y" may have a more precise abstract
                 -- mapping that we want to update "x" with.
                 _  -> case e2 of
-                    Variable var -> putEnv env var a1
+                    Variable var -> putEnv env var (deduceEq a1 flipped)
                     _  -> env
         Lt e1 e2 ->
             if flipped then
                 aEvalBExp (Or (Gt e1 e2) (Eq e1 e2)) env (not flipped)
             else do
                 a1 <- aEvalAExp e1 env
-                a2 <- aEvalAExp e1 env
+                a2 <- aEvalAExp e2 env
                 Right $ case e1 of
                     Variable var ->
                         putEnv env var (deduceLess a2)
@@ -434,7 +529,7 @@ instance AbstractDomain Sign where
                 aEvalBExp (Or (Lt e1 e2) (Eq e1 e2)) env (not flipped)
             else do
                 a1 <- aEvalAExp e1 env
-                a2 <- aEvalAExp e1 env
+                a2 <- aEvalAExp e2 env
                 Right $ case e1 of
                     Variable var ->
                         putEnv env var (deduceGreater a2)
@@ -445,24 +540,43 @@ instance AbstractDomain Sign where
         -- These are used to deduce an abstract value for a variable under
         -- certain conditions. For example,
         --
-        --   if x < 0: then, 0 -> SZero, and we can deduce x should be SNeg
-        --   if x > 0: then, 0 -> SZero, and we can deduce x should be SPos
-        --   if x > 5: then, 5 -> SPos, and we can deduce x should be SPos
+        --   if x < 0: then, 0 -> SZ, and we can deduce x should be SN
+        --   if x > 0: then, 0 -> SZ, and we can deduce x should be SP
+        --
+        -- A more interesting case,
+        --
+        --   if x > y: suppose, y -> SZP, and we can deduce x should be SP
         --
         -- This doesn't work all the time, for example,
         --
-        --   if x < 5: then, 3 -> SPos, but we can't say anything too precise
+        --   if x < 5: then, 3 -> SP, but we can't say anything too precise
         --   about "x". It could be negative, zero, or positive.
         deduceLess :: Sign -> Sign
         deduceLess a = case a of
-            SZero -> SNeg
-            SPos  -> STop
-            _     -> a
+            SZ -> SN
+            SP -> ST
+            SZP -> ST
+            SNZ -> SN
+            _  -> a
         deduceGreater :: Sign -> Sign
         deduceGreater a = case a of
-            SZero -> SPos
-            SNeg  -> STop
+            SZ -> SP
+            SN  -> ST
+            SNZ -> ST
+            SZP -> SP
             _     -> a
+        deduceEq :: Sign -> Bool -> Sign
+        deduceEq a flipped =
+            if not flipped then a
+            else case a of
+                ST -> SB  -- TODO
+                SZP -> SN
+                SNP -> SZ
+                SNZ -> SP
+                SP -> SNZ
+                SZ -> SNP
+                SN -> SZP
+                SB -> SB -- TODO
 
     aEvalCommand c env = case c of
         Skip ->
@@ -478,15 +592,20 @@ instance AbstractDomain Sign where
         -- branch with its respective environment, exhausting cases in which
         -- the guard was satisfied and unsatisfied. After evaluating both
         -- branches, we perform the join of the resulting environments.
-        -- Intuitively, this is like the "summation" of all the information
-        -- we have gathered from the branches. Suppose two different executions
-        -- of the program result in two different branches taken. We want to
+        --
+        -- Intuitively, this is like the "summation" of all the information we
+        -- have gathered from the branches. Suppose two different executions of
+        -- the program result in two different branches taken. We want to
         -- obtain an abstract value which encapsulates both (all) executions.
         If guard c1 c2 -> do
             env_sat <- aEvalBExp guard env False
             env_unsat <- aEvalBExp (Not guard) env False
-            env1 <- aEvalCommand c1 env_sat
-            env2 <- aEvalCommand c2 env_unsat
+
+            let env_sat' = meetEnv env env_sat
+            let env_unsat' = meetEnv env env_unsat
+
+            env1 <- aEvalCommand c1 env_sat'
+            env2 <- aEvalCommand c2 env_unsat'
             Right $ joinEnv env1 env2
         -- TODO: Implement while.
         While _ _ ->
@@ -496,6 +615,10 @@ instance AbstractDomain Sign where
             Right $ putEnv env var a
         Print _ ->
             Right env
+        -- User input is entirely arbitrary (i.e. it could be negative, zero,
+        -- or positive).
+        Input var ->
+            Right $ putEnv env var ST
 
 signEvalProgram :: Program -> Maybe (IEnv Sign)
 signEvalProgram p =
@@ -504,59 +627,55 @@ signEvalProgram p =
 abstractMain :: IO ()
 abstractMain = do
     --
-    -- At the end of the following example, we can statically assert that the
-    -- value of "x" is positive.
-    --
-    -- x := -1;          | x -> SNeg
-    -- if x < 0 then     | x -> SNeg
-    --     x := x * -1;  | x -> SPos
-    -- else              | x -> STop
-    --     x := 1        | x -> SPos
-    -- end               | x -> SPos
+    -- x := -1;      | x -> SN
+    -- x := x * -1;  | x -> SP
     --
     evaluate [ Assign "x" (ALiteral (-1))
+             , Assign "x" (Mult (Variable "x") (ALiteral (-1)))
+             ]
+
+    --
+    -- x := input()      | x -> ST
+    -- if x < 0 then     | x -> SN
+    --     x := x * -1;  | x -> SP
+    -- else              | x -> SZP
+    --     x := x + 1;   | x -> SP
+    -- end               | x -> SP
+    --
+    evaluate [ Input "x"
              , If (Lt (Variable "x") (ALiteral 0))
                   (Assign "x" (Mult (Variable "x") (ALiteral (-1))))
-                  (Assign "x" (ALiteral 1))
+                  (Assign "x" (Add (Variable "x") (ALiteral 1)))
              ]
+
     --
-    -- At the end of the following example, we can statically assert that we
-    -- will certainly not have a division by 0.
+    -- x := input()      | x -> ST
+    -- if !(x = 0) then  | x -> SNP
+    --     x := x - 1;   | x -> ST
+    -- else              | x -> SZ
+    --     x := x + 1;   | x -> SP
+    -- end               | x -> ST
     --
-    -- x := 1;          | x -> SPos
-    -- y := 1;          | x -> SZero, y -> SPos
-    -- if x > 0 then    | x -> SPos, y -> SPos
-    --     y := y / x;  | x -> SPos, y -> SPos
-    -- else             | x -> STop, y -> SPos
-    --     y := 1       | x -> STop, y -> SPos
-    -- end              | x -> STop, y -> SPos
-    --
-    evaluate [ Assign "x" (ALiteral 1)
-             , Assign "y" (ALiteral 1)
-             , If (Gt (Variable "x") (ALiteral 0))
-                  (Assign "y" (Div (Variable "y") (Variable "x")))
-                  (Assign "y" (ALiteral 1))
+    evaluate [ Input "x"
+             , If (Not (Eq (Variable "x") (ALiteral 0)))
+                  (Assign "x" (Sub (Variable "x") (ALiteral (1))))
+                  (Assign "x" (Add (Variable "x") (ALiteral (1))))
              ]
+
     --
-    -- We may encounter division by 0 when "x" is 0. At the point where we
-    -- perform the division, we should set "y" to SBot. At the end of the
-    -- program, we perform the join of SBot and SNeg and "y" is set to SNeg.
+    -- x := input()             | x -> ST
+    -- if x >= 0 && x = 0 then  | x -> SZ
+    --     x := x - 1;          | x -> SN
+    -- else                     | x -> SNP
+    --     skip;                | x -> SNP
+    -- end                      | x -> SNP
     --
-    -- x := 0;                | x -> SZero
-    -- y := 5;                | x -> SZero, y -> SPos
-    -- if x > 0 or x = 0 then | x -> STop, y -> SPos   TODO: maybe here we can
-    --                                                 deduce that x = 0?
-    --     y := y / x;        | x -> STop, y -> SBot
-    -- else                   | x -> SNeg, y -> SPos
-    --     y := -1            | x -> SNeg, y -> SNeg
-    -- end                    | x -> STop, y -> SNeg
-    --
-    evaluate [ Assign "x" (ALiteral 0)
-             , Assign "y" (ALiteral 5)
-             , If (Or (Gt (Variable "x") (ALiteral 0))
-                      (Eq (Variable "x") (ALiteral 0)))
-                  (Assign "y" (Div (Variable "y") (Variable "x")))
-                  (Assign "y" (ALiteral (-1)))
+    evaluate [ Input "x"
+             , If (And (Or (Gt (Variable "x") (ALiteral 0))
+                           (Eq (Variable "x") (ALiteral 0)))
+                       (Eq (Variable "x") (ALiteral 0)))
+                  (Assign "x" (Sub (Variable "x") (ALiteral (1))))
+                  (Skip)
              ]
   where
     evaluate commands = do
@@ -567,7 +686,7 @@ abstractMain = do
 concreteMain :: IO ()
 concreteMain = do
     --
-    -- x := 42;
+    -- x := input();
     -- while !(x = 1) do
     --     print x;
     --     if x % 2 = 0 then
@@ -579,7 +698,7 @@ concreteMain = do
     -- print x;
     --
     let commands = 
-         [ Assign "x" (ALiteral 42)
+         [ Input "x"
          , While (Not (Eq (Variable "x") (ALiteral 1)))
                  (Seq (Print (Variable "x"))
                       (If (Eq (Mod (Variable "x") (ALiteral 2)) (ALiteral 0))
@@ -589,6 +708,9 @@ concreteMain = do
          , Print (Variable "x")
          ]
     let p = foldr (Seq) Skip commands
+    -- Input:
+    -- 42
+    --
     -- Output:
     -- 42
     -- 21
