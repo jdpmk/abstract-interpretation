@@ -114,7 +114,7 @@ instance (AbstractDomain a, Show a) => Show (InterpretedCommand a) where
 
         showEnv env d =
             getIndent d ++
-            "{ " ++ (List.intercalate "; " $ map mapping env) ++ " }" ++ "\n"
+            "{ " ++ (List.intercalate " ; " $ map mapping env) ++ " }" ++ "\n"
               where
                 mapping (var, a) = show var ++ " -> " ++ show a
 
@@ -122,11 +122,10 @@ instance (AbstractDomain a, Show a) => Show (InterpretedCommand a) where
             let indent = getIndent d in
             case c of
                 ISkip env ->
-                    indent ++ "skip\n" ++
-                    showEnv env d
+                    ""
                 ISeq c1 c2 env ->
-                    indent ++ aux c1 d ++
-                    indent ++ aux c2 d ++ "\n"
+                    aux c1 d ++
+                    aux c2 d
                 IIf guard env_sat c1 env_unsat c2 env ->
                     indent ++ "if " ++ show guard ++ " then\n" ++
                     showEnv env_sat (d + indent_width) ++
@@ -134,7 +133,7 @@ instance (AbstractDomain a, Show a) => Show (InterpretedCommand a) where
                     indent ++ "else\n" ++
                     showEnv env_unsat (d + indent_width) ++
                     aux c2 (d + indent_width) ++
-                    "end\n" ++
+                    indent ++ "end\n" ++
                     showEnv env d
                 IWhile _ _ _ ->
                     undefined
@@ -499,12 +498,18 @@ instance AbstractDomain Sign where
 
                 (SP, SP) -> SP
                 (SN, SN) -> SP
-                (SP, SN) -> SP
+                (SP, SN) -> SN
                 (SN, SP) -> SN
 
                 (SZP, SZP) -> SZP
                 (SZP, SNZ) -> SNZ
                 (SNZ, SZP) -> SNZ
+
+                (SP, SNP) -> SNP
+                (SNP, SP) -> SNP
+                (SN, SNP) -> SNP
+                (SNP, SN) -> SNP
+                (SNP, SNP) -> SNP
 
                 (_, _) -> ST
         Div e1 e2 -> do
@@ -522,11 +527,15 @@ instance AbstractDomain Sign where
 
                 (x, SP) -> x
 
-                (SP, SN) -> SN
-                (SN, SN) -> SP
+                (SP, SN)  -> SN
+                (SN, SN)  -> SP
                 (SZP, SN) -> SNZ
                 (SNP, SN) -> SNP
                 (SNZ, SN) -> SZP
+
+                (SP, SNP) -> SNP
+                (SN, SNP) -> SNP
+                (SNP, SNP) -> SNP
 
                 (_, _) -> ST
         Mod e1 e2 -> do
@@ -795,6 +804,46 @@ abstractMain = do
                        (Eq (Variable "x") (ALiteral 0)))
                   (Assign "x" (Sub (Variable "x") (ALiteral (1))))
                   (Skip)
+             ]
+
+    --
+    -- x := input()             | x -> ST
+    -- if x >= 0 && x = 0 then  | x -> SZ
+    --     x := x - 1;          | x -> SN
+    -- else                     | x -> SNP
+    --     skip;                | x -> SNP
+    -- end                      | x -> SNP
+    --
+    evaluate [ Input "x"
+             , If (And (Or (Gt (Variable "x") (ALiteral 0))
+                           (Eq (Variable "x") (ALiteral 0)))
+                       (Eq (Variable "x") (ALiteral 0)))
+                  (Assign "x" (Sub (Variable "x") (ALiteral (1))))
+                  (Skip)
+             ]
+
+    -- Example program, where we verify that a division-by-0 will not occur.
+    evaluate [ Input "x"
+             , If (Gt (Variable "x") (ALiteral 0))
+                  (Assign "x" (Mult (Variable "x") (ALiteral (-2))))
+                  (If (Lt (Variable "x") (ALiteral 0))
+                      (Assign "x" (Mult (Variable "x") (ALiteral (-5))))
+                      (Assign "x" (Add (Variable "x") (ALiteral 1))))
+             , Assign "y" (Div (ALiteral 1) (Variable "x"))
+             ]
+
+    -- Example program, equivalent to the above, where the Sign domain is not
+    -- precise enough to determine that a division-by-0 will certainly not
+    -- occur.
+    evaluate [ Input "x"
+             , If (Gt (Variable "x") (ALiteral 0))
+                  (Seq (Assign "a" (Mult (Variable "x") (ALiteral 3)))
+                       (Assign "x" (Sub (Variable "x") (Variable "a"))))
+                  (If (Lt (Variable "x") (ALiteral 0))
+                      (Seq (Assign "b" (Mult (Variable "x") (ALiteral 6)))
+                          (Assign "x" (Sub (Variable "x") (Variable "b"))))
+                      (Assign "x" (ALiteral 1)))
+             , Assign "y" (Div (ALiteral 1) (Variable "x"))
              ]
   where
     separator = putStrLn ""
