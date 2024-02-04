@@ -18,7 +18,7 @@ import qualified Data.Either as Either
 type Env a b = [(a, b)]
 
 getEnv :: (Show a, Eq a) => Env a b -> a -> Either String b
-getEnv [] k = Left $ "unknown key: " ++ show k
+getEnv [] k = Left $ "unknown: " ++ show k
 getEnv ((x, v):rest) k = if x == k then Right v else getEnv rest k
 
 putEnv :: (Eq a) => Env a b -> a -> b -> Env a b
@@ -52,6 +52,7 @@ data BExp
     | Gt AExp AExp
     deriving Show
 
+-- TODO: Add static assertions that are checked during abstract interpretation.
 data Command
     = Skip
     | Seq Command Command
@@ -182,6 +183,7 @@ evalProgram p = do
 --
 -- See:
 -- * https://en.wikipedia.org/wiki/Partially_ordered_set
+--
 class PartialOrd a where
     -- Less-than-or-equal-to relation.
     le :: a -> a -> Bool
@@ -197,6 +199,7 @@ class PartialOrd a where
 --
 -- See:
 -- * https://en.wikipedia.org/wiki/Lattice_(order)
+--
 class PartialOrd a => Lattice a where
     -- Join, or least upper bound.
     join :: a -> a -> a
@@ -207,8 +210,11 @@ class PartialOrd a => Lattice a where
 -- Abstract domain of signs.
 --
 -- The domain of signs is simple: we map variables (numbers) to a value
--- indicating their sign. An application of this abstract domain is proving
--- the absence of a division-by-0.
+-- indicating their sign. We also have compound states to indicate the possible
+-- presence of multiple signs, such as SZP for zero or positive.
+--
+-- A useful application of this abstract domain is proving the absence of a
+-- division-by-0.
 --
 data Sign = ST | SZP | SNP | SNZ | SP | SZ | SN | SB deriving Show
 
@@ -234,6 +240,7 @@ instance PartialOrd Sign where
 instance Lattice Sign where
     join x y = case (x, y) of
         (x, y) | eq x y -> x
+
         (_, ST) -> ST
         (ST, _) -> ST
         (SB, x) -> x
@@ -549,22 +556,22 @@ instance AbstractDomain Sign where
         --
         -- This doesn't work all the time, for example,
         --
-        --   if x < 5: then, 3 -> SP, but we can't say anything too precise
-        --   about "x". It could be negative, zero, or positive.
+        --   if x < 5: then, 3 -> SP, but we can't assign anything more precise
+        --   than ST to "x". It could be negative, zero, or positive.
         deduceLess :: Sign -> Sign
         deduceLess a = case a of
-            SZ -> SN
-            SP -> ST
+            SZ  -> SN
+            SP  -> ST
             SZP -> ST
             SNZ -> SN
-            _  -> a
+            _   -> a
         deduceGreater :: Sign -> Sign
         deduceGreater a = case a of
-            SZ -> SP
+            SZ  -> SP
             SN  -> ST
             SNZ -> ST
             SZP -> SP
-            _     -> a
+            _   -> a
         deduceEq :: Sign -> Bool -> Sign
         deduceEq a flipped =
             if not flipped then a
@@ -576,7 +583,7 @@ instance AbstractDomain Sign where
                 SP -> SNZ
                 SZ -> SNP
                 SN -> SZP
-                SB -> SB -- TODO
+                SB -> SB  -- TODO
 
     aEvalCommand c env = case c of
         Skip ->
@@ -620,12 +627,24 @@ instance AbstractDomain Sign where
         Input var ->
             Right $ putEnv env var ST
 
-signEvalProgram :: Program -> Maybe (IEnv Sign)
-signEvalProgram p =
-    Either.either (const Nothing) Just $ aEvalCommand p []
+-- Interprets a program over the abstract domain of signs, returning the final
+-- state of the abstract environment.
+-- TODO: Return [IEnvOrError Sign], i.e. the state of the abstract interpreter
+-- at each step of the program.
+signEvalProgram :: Program -> IEnvOrError Sign
+signEvalProgram p = aEvalCommand p []
+
 
 abstractMain :: IO ()
 abstractMain = do
+    --
+    -- x := -1;  | x -> SN
+    -- x := y;   | ERROR: "y" is unknown
+    --
+    evaluate [ Assign "x" (ALiteral (-1))
+             , Assign "x" (Variable "y")
+             ]
+
     --
     -- x := -1;      | x -> SN
     -- x := x * -1;  | x -> SP
@@ -681,7 +700,7 @@ abstractMain = do
     evaluate commands = do
         let p = foldr (Seq) Skip commands
         let env = signEvalProgram p
-        Monad.when (Maybe.isJust env) $ putStrLn $ show $ Maybe.fromJust env
+        putStrLn $ show env
 
 concreteMain :: IO ()
 concreteMain = do
@@ -704,7 +723,7 @@ concreteMain = do
                       (If (Eq (Mod (Variable "x") (ALiteral 2)) (ALiteral 0))
                           (Assign "x" (Div (Variable "x") (ALiteral 2)))
                           (Assign "x" (Add (Mult (ALiteral 3) (Variable "x"))
-                                             (ALiteral 1)))))
+                                           (ALiteral 1)))))
          , Print (Variable "x")
          ]
     let p = foldr (Seq) Skip commands
