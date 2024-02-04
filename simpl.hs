@@ -8,8 +8,9 @@
 
 
 import qualified Control.Monad as Monad
-import qualified Data.Maybe as Maybe
 import qualified Data.Either as Either
+import qualified Data.List as List
+import qualified Data.Maybe as Maybe
 
 
 -- Utilities.
@@ -18,7 +19,7 @@ import qualified Data.Either as Either
 type Env a b = [(a, b)]
 
 getEnv :: (Show a, Eq a) => Env a b -> a -> Either String b
-getEnv [] k = Left $ "unknown: " ++ show k
+getEnv [] k = Left $ "unknown " ++ show k
 getEnv ((x, v):rest) k = if x == k then Right v else getEnv rest k
 
 putEnv :: (Eq a) => Env a b -> a -> b -> Env a b
@@ -40,7 +41,23 @@ data AExp
     | Mult AExp AExp
     | Div AExp AExp
     | Mod AExp AExp
-    deriving Show
+
+instance Show AExp where
+    show e = case e of
+        ALiteral val ->
+            show val
+        Variable var ->
+            var
+        Add e1 e2 ->
+            show e1 ++ " + " ++ show e2
+        Sub e1 e2 ->
+            show e1 ++ " - " ++ show e2
+        Mult e1 e2 ->
+            show e1 ++ " * " ++ show e2
+        Div e1 e2 ->
+            show e1 ++ " / " ++ show e2
+        Mod e1 e2 ->
+            show e1 ++ " % " ++ show e2
 
 data BExp
     = BLiteral Bool
@@ -50,7 +67,23 @@ data BExp
     | Eq AExp AExp
     | Lt AExp AExp
     | Gt AExp AExp
-    deriving Show
+
+instance Show BExp where
+    show e = case e of
+        BLiteral b ->
+            if b then "true" else "false"
+        Not b ->
+            "!(" ++ show b ++ ")"
+        Or e1 e2 ->
+            "(" ++ show e1 ++ " || " ++ show e2 ++ ")"
+        And e1 e2 ->
+            "(" ++ show e1 ++ " && " ++ show e2 ++ ")"
+        Eq e1 e2 ->
+            show e1 ++ " = " ++ show e2
+        Lt e1 e2 ->
+            show e1 ++ " < " ++ show e2
+        Gt e1 e2 ->
+            show e1 ++ " > " ++ show e2
 
 -- TODO: Add static assertions that are checked during abstract interpretation.
 data Command
@@ -63,8 +96,72 @@ data Command
     | Input Ident
     deriving Show
 
-type Program = Command
+data InterpretedCommand a
+    = ISkip (IEnv a)
+    | ISeq (InterpretedCommand a) (InterpretedCommand a) (IEnv a)
+    | IIf BExp (IEnv a) (InterpretedCommand a) (IEnv a) (InterpretedCommand a)
+          (IEnv a)
+    | IWhile BExp (InterpretedCommand a) (IEnv a)
+    | IAssign Ident AExp (IEnv a)
+    | IPrint AExp (IEnv a)
+    | IInput Ident (IEnv a)
 
+instance (AbstractDomain a, Show a) => Show (InterpretedCommand a) where
+    show c = aux c 0
+      where
+        indent_width = 4
+        getIndent d = replicate d ' '
+
+        showEnv env d =
+            getIndent d ++
+            "{ " ++ (List.intercalate "; " $ map mapping env) ++ " }" ++ "\n"
+              where
+                mapping (var, a) = show var ++ " -> " ++ show a
+
+        aux c d =
+            let indent = getIndent d in
+            case c of
+                ISkip env ->
+                    indent ++ "skip\n" ++
+                    showEnv env d
+                ISeq c1 c2 env ->
+                    indent ++ aux c1 d ++
+                    indent ++ aux c2 d ++ "\n"
+                IIf guard env_sat c1 env_unsat c2 env ->
+                    indent ++ "if " ++ show guard ++ " then\n" ++
+                    showEnv env_sat (d + indent_width) ++
+                    aux c1 (d + indent_width) ++
+                    indent ++ "else\n" ++
+                    showEnv env_unsat (d + indent_width) ++
+                    aux c2 (d + indent_width) ++
+                    "end\n" ++
+                    showEnv env d
+                IWhile _ _ _ ->
+                    undefined
+                IAssign var e env ->
+                    indent ++ var ++ " := " ++ show e ++ "\n" ++
+                    showEnv env d
+                IPrint e env ->
+                    indent ++ show e ++ "\n" ++
+                    showEnv env d
+                IInput var env ->
+                    indent ++ var ++ " := input()\n" ++
+                    showEnv env d
+
+
+type Program = Command
+type InterpretedProgram a = InterpretedCommand a
+type Interpretation a = InterpretedProgram a
+
+getState :: (AbstractDomain a) => Interpretation a -> IEnv a
+getState c = case c of
+    ISkip e -> e
+    ISeq _ _ e -> e
+    IIf _ _ _ _ _ e -> e
+    IWhile _ _ e -> e
+    IAssign _ _ e -> e
+    IPrint _ e -> e
+    IInput _ e -> e
 
 -- Concrete interpreter.
 
@@ -326,11 +423,13 @@ joinEnv = mergeEnv join
 meetEnv :: (Lattice a) => IEnv a -> IEnv a -> IEnv a
 meetEnv = mergeEnv meet
 
-type IEnvOrError a = Either String (IEnv a)
+type IEnvOrErr a = Either String (IEnv a)
+type InterpOrErr a = Either String (Interpretation a)
+
 class Lattice a => AbstractDomain a where
     aEvalAExp :: (Lattice a) => AExp -> IEnv a -> Either String a
-    aEvalBExp :: (Lattice a) => BExp -> IEnv a -> Bool -> IEnvOrError a
-    aEvalCommand :: (Lattice a) => Command -> IEnv a -> IEnvOrError a
+    aEvalBExp :: (Lattice a) => BExp -> IEnv a -> Bool -> IEnvOrErr a
+    aEvalCommand :: (Lattice a) => Command -> IEnv a -> InterpOrErr a
 
 instance AbstractDomain Sign where
     aEvalAExp e env = case e of
@@ -587,11 +686,11 @@ instance AbstractDomain Sign where
 
     aEvalCommand c env = case c of
         Skip ->
-            Right env
+            Right (ISkip env)
         Seq c1 c2 -> do
-            env'  <- aEvalCommand c1 env
-            env'' <- aEvalCommand c2 env'
-            Right env''
+            interp'  <- aEvalCommand c1 env
+            interp'' <- aEvalCommand c2 (getState interp')
+            Right $ ISeq interp' interp'' (getState interp'')
         -- Our abstract interpreter differs from our concrete interpreter in
         -- the fact that we are interested in exploring both branches of
         -- conditionals, not just the one for which the guard is satisfied.
@@ -611,27 +710,28 @@ instance AbstractDomain Sign where
             let env_sat' = meetEnv env env_sat
             let env_unsat' = meetEnv env env_unsat
 
-            env1 <- aEvalCommand c1 env_sat'
-            env2 <- aEvalCommand c2 env_unsat'
-            Right $ joinEnv env1 env2
+            interp1 <- aEvalCommand c1 env_sat'
+            interp2 <- aEvalCommand c2 env_unsat'
+            Right $ IIf guard env_sat' interp1 env_unsat' interp2
+                    (joinEnv (getState interp1) (getState interp2))
         -- TODO: Implement while.
         While _ _ ->
             undefined
         Assign var e -> do
             a <- aEvalAExp e env
-            Right $ putEnv env var a
-        Print _ ->
-            Right env
+            Right $ IAssign var e (putEnv env var a)
+        Print e ->
+            Right $ IPrint e env
         -- User input is entirely arbitrary (i.e. it could be negative, zero,
         -- or positive).
         Input var ->
-            Right $ putEnv env var ST
+            Right $ IInput var (putEnv env var ST)
 
 -- Interprets a program over the abstract domain of signs, returning the final
 -- state of the abstract environment.
 -- TODO: Return [IEnvOrError Sign], i.e. the state of the abstract interpreter
 -- at each step of the program.
-signEvalProgram :: Program -> IEnvOrError Sign
+signEvalProgram :: Program -> InterpOrErr Sign
 signEvalProgram p = aEvalCommand p []
 
 
@@ -697,10 +797,16 @@ abstractMain = do
                   (Skip)
              ]
   where
+    separator = putStrLn ""
     evaluate commands = do
+        separator
         let p = foldr (Seq) Skip commands
-        let env = signEvalProgram p
-        putStrLn $ show env
+        case signEvalProgram p of
+            Right interp ->
+                putStrLn $ show interp
+            Left error ->
+                putStrLn $ "ERROR: " ++ error
+        separator
 
 concreteMain :: IO ()
 concreteMain = do
