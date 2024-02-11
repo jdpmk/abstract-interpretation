@@ -22,7 +22,7 @@ getEnv :: (Show a, Eq a) => Env a b -> a -> Either String b
 getEnv [] k = Left $ "unknown " ++ show k
 getEnv ((x, v):rest) k = if x == k then Right v else getEnv rest k
 
-putEnv :: (Eq a) => Env a b -> a -> b -> Env a b
+putEnv :: Eq a => Env a b -> a -> b -> Env a b
 putEnv env k v = (k, v):(filter (\(x, _) -> x /= k) env)
 
 -- A wrapper around an environment keyed on identifiers, the primary use case
@@ -35,7 +35,7 @@ type IEnv a = Env Ident a
 
 data Info = Info
     { label :: Int
-    }
+    } deriving Show
 
 data AExp
     = ALiteral Int
@@ -98,8 +98,11 @@ data Command
     | Assign Info Ident AExp
     | Print Info AExp
     | Input Info Ident
+    | Invariant Info BExp
     deriving Show
 
+-- TODO: Find a better way to represent intermediate state, then
+-- condense this ADT with Command.
 data Interpretation a
     = ISkip Info (IEnv a)
     | ISeq (Interpretation a) (Interpretation a) (IEnv a)
@@ -111,6 +114,7 @@ data Interpretation a
     | IAssign Info Ident AExp (IEnv a)
     | IPrint Info AExp (IEnv a)
     | IInput Info Ident (IEnv a)
+    | IInvariant Info BExp (IEnv a)
 
 instance (AbstractDomain a, Show a) => Show (Interpretation a) where
     show c = aux c 0
@@ -152,11 +156,14 @@ instance (AbstractDomain a, Show a) => Show (Interpretation a) where
                 IInput i var env ->
                     indent ++ var ++ " := input()\n" ++
                     showEnv env d
+                IInvariant i e env ->
+                    indent ++ "invariant " ++ show e ++ "\n" ++
+                    showEnv env d
 
 
 type Program = Command
 
-getState :: (AbstractDomain a) => Interpretation a -> IEnv a
+getState :: AbstractDomain a => Interpretation a -> IEnv a
 getState c = case c of
     ISkip _ e -> e
     ISeq _ _ e -> e
@@ -165,6 +172,7 @@ getState c = case c of
     IAssign _ _ _ e -> e
     IPrint _ _ e -> e
     IInput _ _ e -> e
+    IInvariant _ _ e -> e
 
 -- Concrete interpreter.
 
@@ -264,6 +272,8 @@ evalCommand c env = case c of
         input <- getLine
         let input_as_int = read input :: Int
         return $ Right $ putEnv env var input_as_int
+    Invariant _ _ ->
+        return $ Right env
 
 evalProgram :: Program -> IO (Maybe String)
 evalProgram p = do
@@ -409,34 +419,34 @@ instance Lattice Sign where
 
 -- Abstract interpreter.
 
-mergeEnv :: (Lattice a) => (a -> a -> a) -> IEnv a -> IEnv a -> IEnv a
+mergeEnv :: Lattice a => (a -> a -> a) -> IEnv a -> IEnv a -> IEnv a
 mergeEnv f env1 env2 = foldr (mergeMapping f env1) [] env2
   where
-    mergeMapping :: (Lattice a)
+    mergeMapping :: Lattice a
                  => (a -> a -> a)
                  -> IEnv a
                  -> (Ident, a)
                  -> IEnv a
                  -> IEnv a
-    mergeMapping f env1 (var, aval) acc =
+    mergeMapping f env1 (var, aval2) acc =
         let joined = case getEnv env1 var of
-                         Left _ -> aval
-                         Right aval1 -> f aval1 aval
+                         Left _ -> aval2
+                         Right aval1 -> f aval1 aval2
         in (var, joined):acc
 
-joinEnv :: (Lattice a) => IEnv a -> IEnv a -> IEnv a
+joinEnv :: Lattice a => IEnv a -> IEnv a -> IEnv a
 joinEnv = mergeEnv join
 
-meetEnv :: (Lattice a) => IEnv a -> IEnv a -> IEnv a
+meetEnv :: Lattice a => IEnv a -> IEnv a -> IEnv a
 meetEnv = mergeEnv meet
 
 type IEnvOrErr a = Either String (IEnv a)
 type InterpretationOrErr a = Either String (Interpretation a)
 
 class Lattice a => AbstractDomain a where
-    aEvalAExp :: (Lattice a) => AExp -> IEnv a -> Either String a
-    aEvalBExp :: (Lattice a) => BExp -> IEnv a -> Bool -> IEnvOrErr a
-    aEvalCommand :: (Lattice a) => Command -> IEnv a -> InterpretationOrErr a
+    aEvalAExp :: Lattice a => AExp -> IEnv a -> Either String a
+    aEvalBExp :: Lattice a => BExp -> IEnv a -> Bool -> IEnvOrErr a
+    aEvalCommand :: Lattice a => Command -> IEnv a -> InterpretationOrErr a
 
 instance AbstractDomain Sign where
     aEvalAExp e env = case e of
@@ -743,6 +753,29 @@ instance AbstractDomain Sign where
         -- or positive).
         Input i var ->
             Right $ IInput i var (putEnv env var ST)
+        Invariant i e -> do
+            env_inv <- aEvalBExp e env False
+            let mismatches = collectMismatches env env_inv
+            if null mismatches then
+                Right $ IInvariant i e (meetEnv env env_inv)
+            else
+                let instances = unlines (map reportMismatch mismatches) in
+                let error = "error: unsatisfied invariant at label " ++
+                            show (label i) ++ "\n\n" ++
+                            show (IInvariant i e env) ++ "\n" ++
+                            instances
+                in Left error
+          where
+            reportMismatch (var, inv_aval, env_aval) =
+                "requires: " ++ show var ++ " -> " ++ show inv_aval ++ "\n" ++
+                "found:    " ++ show var ++ " -> " ++ show env_aval
+            mappingsFrom env (var, inv_aval) acc =
+                let env_aval = case getEnv env var of
+                                  Left _ -> inv_aval
+                                  Right env_aval -> env_aval
+                in if le env_aval inv_aval then acc
+                   else (var, inv_aval, env_aval):acc
+            collectMismatches env env_inv = foldr (mappingsFrom env) [] env_inv
 
 -- Interprets a program over the abstract domain of signs, returning the final
 -- state of the abstract environment.
@@ -763,11 +796,16 @@ abstractMain = do
              ]
 
     --
-    -- x := -1;      | x -> SN
-    -- x := x * -1;  | x -> SP
+    -- x := -1;         | x -> SN
+    -- invariant x < 0  |
+    -- x := x * -1;     | x -> SP
+    -- invariant x > 0
     --
     evaluate [ Assign (Info 1) "x" (ALiteral (-1))
-             , Assign (Info 2) "x" (Mult (Variable "x") (ALiteral (-1)))
+             , Invariant (Info 2) (Lt (Variable "x") (ALiteral 0))
+             , Assign (Info 3) "x" (Mult (Variable "x") (ALiteral (-1)))
+             , Invariant (Info 4) (Or (Gt (Variable "x") (ALiteral 0))
+                                      (Eq (Variable "x") (ALiteral 0)))
              ]
 
     --
@@ -859,17 +897,32 @@ abstractMain = do
                       (Assign (Info 8) "x" (ALiteral 1)))
              , Assign (Info 9) "y" (Div (ALiteral 1) (Variable "x"))
              ]
+
+    -- Example program, same as above, with an invariant which fails.
+    evaluate [ Input (Info 1) "x"
+             , If (Info 2) (Gt (Variable "x") (ALiteral 0))
+                  (Seq (Assign (Info 3)
+                               "a" (Mult (Variable "x") (ALiteral 3)))
+                       (Assign (Info 4)
+                               "x" (Sub (Variable "x") (Variable "a"))))
+                  (If (Info 5) (Lt (Variable "x") (ALiteral 0))
+                      (Seq (Assign (Info 6)
+                                   "b" (Mult (Variable "x") (ALiteral 6)))
+                           (Assign (Info 7)
+                                   "x" (Sub (Variable "x") (Variable "b"))))
+                      (Assign (Info 8) "x" (ALiteral 1)))
+             , Invariant (Info 9) (Not (Eq (Variable "x") (ALiteral 0)))
+             , Assign (Info 10) "y" (Div (ALiteral 1) (Variable "x"))
+             ]
   where
-    separator = putStrLn ""
     evaluate commands = do
-        separator
         let p = foldr (Seq) (Skip (Info 0)) commands
         case signEvalProgram p of
             Right interp ->
                 putStrLn $ show interp
             Left error ->
-                putStrLn $ "Error: " ++ error
-        separator
+                putStrLn $ error
+        putStrLn $ replicate 70 '#'
 
 concreteMain :: IO ()
 concreteMain = do
