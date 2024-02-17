@@ -25,10 +25,19 @@ getEnv ((x, v):rest) k = if x == k then Right v else getEnv rest k
 putEnv :: Eq a => Env a b -> a -> b -> Env a b
 putEnv env k v = (k, v):(filter (\(x, _) -> x /= k) env)
 
+showEnv :: (Show a, Show b) => Env a b -> String
+showEnv env =
+    "{ " ++ (List.intercalate " ; " $ map mapping env) ++ " }"
+  where
+    mapping (var, a) = show var ++ " -> " ++ show a
+
 -- A wrapper around an environment keyed on identifiers, the primary use case
 -- for environments in this program.
 type Ident = String
 type IEnv a = Env Ident a
+
+width :: Int
+width = 4
 
 
 -- Abstract syntax tree.
@@ -89,90 +98,44 @@ instance Show BExp where
         Gt e1 e2 ->
             show e1 ++ " > " ++ show e2
 
--- TODO: Add static assertions that are checked during abstract interpretation.
 data Command
     = Skip Info
     | Seq Command Command
     | If Info BExp Command Command
     | While Info BExp Command
     | Assign Info Ident AExp
-    | Print Info AExp
     | Input Info Ident
+    | Print Info AExp
     | Invariant Info BExp
-    deriving Show
 
--- TODO: Find a better way to represent intermediate state, then
--- condense this ADT with Command.
-data Interpretation a
-    = ISkip Info (IEnv a)
-    | ISeq (Interpretation a) (Interpretation a) (IEnv a)
-    | IIf Info BExp
-          (IEnv a) (Interpretation a)
-          (IEnv a) (Interpretation a)
-          (IEnv a)
-    | IWhile Info BExp (Interpretation a) (IEnv a)
-    | IAssign Info Ident AExp (IEnv a)
-    | IPrint Info AExp (IEnv a)
-    | IInput Info Ident (IEnv a)
-    | IInvariant Info BExp (IEnv a)
-
-instance (AbstractDomain a, Show a) => Show (Interpretation a) where
-    show c = aux c 0
+instance Show Command where
+    show c =
+        aux c 0
       where
-        indent_width = 4
-        getIndent d = replicate d ' '
-
-        showEnv env d =
-            getIndent d ++
-            "{ " ++ (List.intercalate " ; " $ map mapping env) ++ " }" ++ "\n"
-              where
-                mapping (var, a) = show var ++ " -> " ++ show a
-
-        aux c d =
-            let indent = getIndent d in
-            case c of
-                ISkip i env ->
-                    ""
-                ISeq c1 c2 env ->
-                    aux c1 d ++
-                    aux c2 d
-                IIf i guard env_sat c1 env_unsat c2 env ->
-                    indent ++ "if " ++ show guard ++ " then\n" ++
-                    showEnv env_sat (d + indent_width) ++
-                    aux c1 (d + indent_width) ++
-                    indent ++ "else\n" ++
-                    showEnv env_unsat (d + indent_width) ++
-                    aux c2 (d + indent_width) ++
-                    indent ++ "end\n" ++
-                    showEnv env d
-                IWhile _ _ _ _ ->
-                    undefined
-                IAssign i var e env ->
-                    indent ++ var ++ " := " ++ show e ++ "\n" ++
-                    showEnv env d
-                IPrint i e env ->
-                    indent ++ show e ++ "\n" ++
-                    showEnv env d
-                IInput i var env ->
-                    indent ++ var ++ " := input()\n" ++
-                    showEnv env d
-                IInvariant i e env ->
-                    indent ++ "invariant " ++ show e ++ "\n" ++
-                    showEnv env d
-
+        aux c d = let ws = replicate d ' ' in case c of
+            Skip _ ->
+                ""
+            Seq c1 c2 ->
+                aux c1 d ++ "\n"
+             ++ aux c2 d 
+            If _ guard c1 c2 ->
+                ws ++ "if " ++ show guard ++ " then\n"
+             ++ aux c1 (d + width) ++ "\n"
+             ++ ws ++ "else\n"
+             ++ aux c2 (d + width) ++ "\n"
+             ++ ws ++ "end"
+            While _ _ _ ->
+                undefined
+            Assign _ var e ->
+                ws ++ var ++ " := " ++ show e ++ ";"
+            Input _ var ->
+                ws ++ var ++ " := input();"
+            Print _ e ->
+                ws ++ "print " ++ show e
+            Invariant _ e ->
+                ws ++ "invariant " ++ show e
 
 type Program = Command
-
-getState :: AbstractDomain a => Interpretation a -> IEnv a
-getState c = case c of
-    ISkip _ e -> e
-    ISeq _ _ e -> e
-    IIf _ _ _ _ _ _ e -> e
-    IWhile _ _ _ e -> e
-    IAssign _ _ _ e -> e
-    IPrint _ _ e -> e
-    IInput _ _ e -> e
-    IInvariant _ _ e -> e
 
 -- Concrete interpreter.
 
@@ -261,6 +224,10 @@ evalCommand c env = case c of
         return $ do
             e' <- evalAExp e env
             Right $ putEnv env var e'
+    Input _ var -> do
+        input <- getLine
+        let input_as_int = read input :: Int
+        return $ Right $ putEnv env var input_as_int
     Print _ e ->
         case evalAExp e env of
             Right e' -> do
@@ -268,10 +235,6 @@ evalCommand c env = case c of
                 return $ Right env
             Left error ->
                 return $ Left error
-    Input _ var -> do
-        input <- getLine
-        let input_as_int = read input :: Int
-        return $ Right $ putEnv env var input_as_int
     Invariant _ _ ->
         return $ Right env
 
@@ -330,20 +293,32 @@ data Sign = ST | SZP | SNP | SNZ | SP | SZ | SN | SB deriving Show
 
 instance PartialOrd Sign where
     le x y = case (x, y) of
+        -- ST is at least as precise as anything else
         (_, ST)    -> True
+        -- Anything else is at least as precise as SB
         (SB, _)    -> True
+
+        -- le x x
         (SZP, SZP) -> True
         (SNP, SNP) -> True
         (SNZ, SNZ) -> True
-        (SZ, SZP)  -> True
-        (SP, SZP)  -> True
-        (SN, SNP)  -> True
-        (SP, SNP)  -> True
-        (SN, SNZ)  -> True
-        (SZ, SNZ)  -> True
         (SP, SP)   -> True
         (SZ, SZ)   -> True
         (SN, SN)   -> True
+
+        -- States which SZP is at least as precise
+        (SP, SZP) -> True
+        (SZ, SZP) -> True
+
+        -- States which SNP is at least as precise
+        (SP, SNP) -> True
+        (SN, SNP) -> True
+
+        -- States which SNZ is at least as precise
+        (SZ, SNZ) -> True
+        (SN, SNZ) -> True
+
+        -- Incomparable states, e.g. SN, SZ
         (_, _)     -> False
 
 -- TODO: Can we enforce commutativity within the typeclass?
@@ -419,6 +394,21 @@ instance Lattice Sign where
 
 -- Abstract interpreter.
 
+data State a = State
+    { success :: Bool
+    , env     :: IEnv a
+    , output  :: String
+    , indent  :: Int
+    }
+
+type StateOrErr a = Either String (State a)
+
+class Lattice a => AbstractDomain a where
+    -- TODO: AbstractValueOrErr
+    aEvalAExp :: Lattice a => AExp -> IEnv a -> Either String a
+    aEvalBExp :: Lattice a => BExp -> IEnv a -> IEnv a -> Bool -> Either String (IEnv a)
+    aEvalCommand :: (Show a, Lattice a) => Command -> State a -> StateOrErr a
+
 mergeEnv :: Lattice a => (a -> a -> a) -> IEnv a -> IEnv a -> IEnv a
 mergeEnv f env1 env2 = foldr (mergeMapping f env1) [] env2
   where
@@ -439,14 +429,6 @@ joinEnv = mergeEnv join
 
 meetEnv :: Lattice a => IEnv a -> IEnv a -> IEnv a
 meetEnv = mergeEnv meet
-
-type IEnvOrErr a = Either String (IEnv a)
-type InterpretationOrErr a = Either String (Interpretation a)
-
-class Lattice a => AbstractDomain a where
-    aEvalAExp :: Lattice a => AExp -> IEnv a -> Either String a
-    aEvalBExp :: Lattice a => BExp -> IEnv a -> Bool -> IEnvOrErr a
-    aEvalCommand :: Lattice a => Command -> IEnv a -> InterpretationOrErr a
 
 instance AbstractDomain Sign where
     aEvalAExp e env = case e of
@@ -580,110 +562,48 @@ instance AbstractDomain Sign where
 
                 (_, _) -> ST
 
-    aEvalBExp e env flipped = case e of
-        -- A literal boolean expression will not affect the abstract
-        -- environment.
-        BLiteral _ ->
-            Right env
-        -- We toggle the flipped flag when performing negation. Effectively,
-        -- this is used to emulate DeMorgan's law "locally" at the other
-        -- binary operations (e.g. Or, Lt, etc).
+    aEvalBExp e env0 envGuard flipped = case e of
+        BLiteral b ->
+            Right envGuard
         Not b ->
-            aEvalBExp b env (not flipped)
-        -- When performing conjunction/disjunction, we evaluate the
-        -- subexpressions, and then perform either the meet or join of the
-        -- resulting environments.
-        --
-        -- For disjunction, we broaden the possible values that can be taken
-        -- on, for example, in "x > 5 || x = 0". In this case, "x" is SP when
-        -- it is greater than 5, or SZ, when it is equal to 0. So, taking the
-        -- join of SP and SZ yields SZP, which is the most precise abstract
-        -- value we can use here, i.e., after this condition we know that "x"
-        -- must be zero or positive.
-        --
-        -- Conjunction is similar, but we narrow the possible values that can
-        -- be taken on, for example, in "x >= 0 && x = 0". In this case, "x"
-        -- may be SZP when greater than or equal to 0, and SZ when equal to 0.
-        -- Taking the meet of these abstract values yields is SZ, which is the
-        -- most precise abstract value we can use here. This also makes sense
-        -- logically: x >= 0 && x = 0 implies x = 0.
-        Or b1 b2 -> do
-            env1 <- aEvalBExp b1 env flipped
-            env2 <- aEvalBExp b2 env flipped
+            aEvalBExp b env0 envGuard (not flipped)
+        Or e1 e2 -> do
+            env1 <- aEvalBExp e1 env0 envGuard flipped
+            env2 <- aEvalBExp e2 env0 envGuard flipped
             Right $ (if flipped then meetEnv else joinEnv) env1 env2
-        And b1 b2 -> do
-            env1 <- aEvalBExp b1 env flipped
-            env2 <- aEvalBExp b2 env flipped
+        And e1 e2 -> do
+            env1 <- aEvalBExp e1 env0 envGuard flipped
+            env2 <- aEvalBExp e2 env0 envGuard flipped
             Right $ (if flipped then joinEnv else meetEnv) env1 env2
-        -- Boolean comparison operators provide a chance to further refine
-        -- our abstract environment. For instance, suppose we have a boolean
-        -- guard like:
-        --
-        --   if x = 0 then
-        --       ...
-        --
-        -- The evaluation of the "x" will result in its current abstract value.
-        -- We can discard this. The evaluation of the literal '0' will result
-        -- in SZ. We want to detect this and update our abstract state for
-        -- "x". In this case, we map "x" to SZ.
-        --
-        -- Technically, the guard can also be written as:
-        --
-        --   if 0 = x then
-        --       ...
-        --
-        -- so we need to check whether EITHER side is a variable, not just the
-        -- left-hand side.
+        -- TODO: Assumption for the comparisons below is that variables are
+        -- always on the LHS of the operator.
         Eq e1 e2 -> do
-            a1 <- aEvalAExp e1 env
-            a2 <- aEvalAExp e2 env
+            a1 <- aEvalAExp e1 env0
+            a2 <- aEvalAExp e2 env0
             Right $ case e1 of
-                Variable var -> putEnv env var (deduceEq a2 flipped)
-                -- TODO: We should also check if e2 is a variable. Suppose the
-                -- guard is: if x = y. "y" may have a more precise abstract
-                -- mapping that we want to update "x" with.
-                _  -> case e2 of
-                    Variable var -> putEnv env var (deduceEq a1 flipped)
-                    _  -> env
+                Variable var -> putEnv envGuard var (deduceEqual a2 flipped)
+                _            -> envGuard
         Lt e1 e2 ->
             if flipped then
-                aEvalBExp (Or (Gt e1 e2) (Eq e1 e2)) env (not flipped)
+                let neg_exp = Or (Gt e1 e2) (Eq e1 e2)
+                in aEvalBExp neg_exp env0 envGuard (not flipped)
             else do
-                a1 <- aEvalAExp e1 env
-                a2 <- aEvalAExp e2 env
+                a1 <- aEvalAExp e1 env0
+                a2 <- aEvalAExp e2 env0
                 Right $ case e1 of
-                    Variable var ->
-                        putEnv env var (deduceLess a2)
-                    _  -> case e2 of
-                        Variable var -> putEnv env var (deduceGreater a1)
-                        _  -> env
+                    Variable var -> putEnv envGuard var (deduceLess a2)
+                    _            -> envGuard
         Gt e1 e2 ->
             if flipped then
-                aEvalBExp (Or (Lt e1 e2) (Eq e1 e2)) env (not flipped)
+                let neg_exp = Or (Lt e1 e2) (Eq e1 e2)
+                in aEvalBExp neg_exp env0 envGuard (not flipped)
             else do
-                a1 <- aEvalAExp e1 env
-                a2 <- aEvalAExp e2 env
+                a1 <- aEvalAExp e1 env0
+                a2 <- aEvalAExp e2 env0
                 Right $ case e1 of
-                    Variable var ->
-                        putEnv env var (deduceGreater a2)
-                    _  -> case e2 of
-                        Variable var -> putEnv env var (deduceLess a1)
-                        _  -> env
+                    Variable var -> putEnv envGuard var (deduceGreater a2)
+                    _            -> envGuard
       where
-        -- These are used to deduce an abstract value for a variable under
-        -- certain conditions. For example,
-        --
-        --   if x < 0: then, 0 -> SZ, and we can deduce x should be SN
-        --   if x > 0: then, 0 -> SZ, and we can deduce x should be SP
-        --
-        -- A more interesting case,
-        --
-        --   if x > y: suppose, y -> SZP, and we can deduce x should be SP
-        --
-        -- This doesn't work all the time, for example,
-        --
-        --   if x < 5: then, 5 -> SP, but we can't assign anything more precise
-        --   than ST to "x". It could be negative, zero, or positive.
         deduceLess :: Sign -> Sign
         deduceLess a = case a of
             SZ  -> SN
@@ -698,8 +618,8 @@ instance AbstractDomain Sign where
             SNZ -> ST
             SZP -> SP
             _   -> a
-        deduceEq :: Sign -> Bool -> Sign
-        deduceEq a flipped =
+        deduceEqual :: Sign -> Bool -> Sign
+        deduceEqual a flipped =
             if not flipped then a
             else case a of
                 ST -> SB  -- TODO
@@ -711,101 +631,92 @@ instance AbstractDomain Sign where
                 SN -> SZP
                 SB -> SB  -- TODO
 
-    aEvalCommand c env = case c of
+    aEvalCommand c s = case c of
         Skip i ->
-            Right (ISkip i env)
+            -- Special case: 
+            Right $ if label i == 0 then s { output = "" } else s
         Seq c1 c2 -> do
-            interp'  <- aEvalCommand c1 env
-            interp'' <- aEvalCommand c2 (getState interp')
-            Right $ ISeq interp' interp'' (getState interp'')
-        -- Our abstract interpreter differs from our concrete interpreter in
-        -- the fact that we are interested in exploring both branches of
-        -- conditionals, not just the one for which the guard is satisfied.
-        -- So we must evaluate the guard and its negation, and evaluate each
-        -- branch with its respective environment, exhausting cases in which
-        -- the guard was satisfied and unsatisfied. After evaluating both
-        -- branches, we perform the join of the resulting environments.
-        --
-        -- Intuitively, this is like the "summation" of all the information we
-        -- have gathered from the branches. Suppose two different executions of
-        -- the program result in two different branches taken. We want to
-        -- obtain an abstract value which encapsulates both (all) executions.
-        If i guard c1 c2 -> do
-            env_sat <- aEvalBExp guard env False
-            env_unsat <- aEvalBExp (Not guard) env False
+            s1 <- aEvalCommand c1 s
+            s2 <- aEvalCommand c2 s1
+            Right $ s2 { output = (output s1)
+                               ++ (output s2) }
+        If _ guard c1 c2 -> do
+            let env0 = env s
+            env_when_sat   <- aEvalBExp guard env0 [] False
+            env_when_unsat <- aEvalBExp (Not guard) env0 [] False
+            let env_then = meetEnv env0 env_when_sat
+            let env_else = meetEnv env0 env_when_unsat
 
-            let env_sat' = meetEnv env env_sat
-            let env_unsat' = meetEnv env env_unsat
+            let si = s { indent = width + indent s }
+            st <- aEvalCommand c1 $ si { env = env_then }
+            se <- aEvalCommand c2 $ si { env = env_else }
 
-            interp1 <- aEvalCommand c1 env_sat'
-            interp2 <- aEvalCommand c2 env_unsat'
-            Right $ IIf i guard env_sat' interp1 env_unsat' interp2
-                    (joinEnv (getState interp1) (getState interp2))
-        -- TODO: Implement while.
+            let env_if = joinEnv (env st) (env se)
+            let ws = replicate (indent s) ' '
+            let nws = replicate (width + indent s) ' '
+
+            Right $ s { env = env_if
+                      , output = ws ++ "if " ++ show guard ++ " then\n"
+                              ++ nws ++ showEnv env_when_sat ++ "\n"
+                              ++ output st
+                              ++ ws ++ "else\n"
+                              ++ nws ++ showEnv env_when_unsat ++ "\n"
+                              ++ output se
+                              ++ ws ++ "end\n"
+                              ++ ws ++ showEnv env_if ++ "\n"
+                      }
         While _ _ _ ->
             undefined
-        Assign i var e -> do
-            a <- aEvalAExp e env
-            Right $ IAssign i var e (putEnv env var a)
-        Print i e ->
-            Right $ IPrint i e env
-        -- User input is entirely arbitrary (i.e. it could be negative, zero,
-        -- or positive).
-        Input i var ->
-            Right $ IInput i var (putEnv env var ST)
-        Invariant i e -> do
-            env_inv <- aEvalBExp e env False
-            let mismatches = collectMismatches env env_inv
-            if null mismatches then
-                Right $ IInvariant i e (meetEnv env env_inv)
-            else
-                let instances = unlines (map reportMismatch mismatches) in
-                let error = "error: unsatisfied invariant at label " ++
-                            show (label i) ++ "\n\n" ++
-                            show (IInvariant i e env) ++ "\n" ++
-                            instances
-                in Left error
-          where
-            reportMismatch (var, inv_aval, env_aval) =
-                "requires: " ++ show var ++ " -> " ++ show inv_aval ++ "\n" ++
-                "found:    " ++ show var ++ " -> " ++ show env_aval
-            mappingsFrom env (var, inv_aval) acc =
-                let env_aval = case getEnv env var of
-                                  Left _ -> inv_aval
-                                  Right env_aval -> env_aval
-                in if le env_aval inv_aval then acc
-                   else (var, inv_aval, env_aval):acc
-            collectMismatches env env_inv = foldr (mappingsFrom env) [] env_inv
+        Assign _ var e -> do
+            let env0 = env s
+            a <- aEvalAExp e env0
+            Right $ log c s { env = putEnv env0 var a }
+        Print _ _ ->
+            Right $ s
+        Input _ var ->
+            let env0 = env s in
+            Right $ log c s { env = putEnv env0 var ST }
+        Invariant _ _ ->
+            undefined
+      where
+        log :: Command -> State Sign -> State Sign
+        log c s =
+            let ws = replicate (indent s) ' ' in
+            s { output = ws ++ show c ++ "\n"
+                      ++ ws ++ showEnv (env s) ++ "\n" }
 
--- Interprets a program over the abstract domain of signs, returning the final
--- state of the abstract environment.
--- TODO: Return [IEnvOrError Sign], i.e. the state of the abstract interpreter
--- at each step of the program.
-signEvalProgram :: Program -> InterpretationOrErr Sign
-signEvalProgram p = aEvalCommand p []
+initialState :: (AbstractDomain a) => State a
+initialState = State { success = True
+                     , env     = []
+                     , output  = ""
+                     , indent  = 0
+                     }
 
+signEvalProgram :: Program -> StateOrErr Sign
+signEvalProgram p = aEvalCommand p initialState
 
 abstractMain :: IO ()
 abstractMain = do
     --
-    -- x := -1;  | x -> SN
-    -- x := y;   | ERROR: "y" is unknown
+    -- x := y;   | ERROR: unknown "y"
     --
-    evaluate [ Assign (Info 1) "x" (ALiteral (-1))
-             , Assign (Info 2) "x" (Variable "y")
+    evaluate [ Assign (Info 1) "x" (Variable "y")
              ]
 
     --
-    -- x := -1;         | x -> SN
-    -- invariant x < 0  |
-    -- x := x * -1;     | x -> SP
-    -- invariant x > 0
+    -- x := 1;   | x -> SP
+    --
+    evaluate [ Assign (Info 1) "x" (ALiteral 1)
+             ]
+
+    --
+    -- x := -1;  | x -> SN
+    -- y := 1;   | x -> SN ; y -> SP
+    -- x := y;   | x -> SP ; y -> SP
     --
     evaluate [ Assign (Info 1) "x" (ALiteral (-1))
-             , Invariant (Info 2) (Lt (Variable "x") (ALiteral 0))
-             , Assign (Info 3) "x" (Mult (Variable "x") (ALiteral (-1)))
-             , Invariant (Info 4) (Or (Gt (Variable "x") (ALiteral 0))
-                                      (Eq (Variable "x") (ALiteral 0)))
+             , Assign (Info 2) "y" (ALiteral (1))
+             , Assign (Info 3) "x" (Variable "y")
              ]
 
     --
@@ -823,49 +734,18 @@ abstractMain = do
              ]
 
     --
-    -- x := input()      | x -> ST
-    -- if !(x = 0) then  | x -> SNP
-    --     x := x - 1;   | x -> ST
-    -- else              | x -> SZ
-    --     x := x + 1;   | x -> SP
-    -- end               | x -> ST
+    -- x := input()            | x -> ST
+    -- if x > 0 or x = 0 then  | x -> SZP
+    --     skip;               | x -> SZP
+    -- else                    | x -> SN
+    --     x := 1;             | x -> SP
+    -- end                     | x -> SZP
+    -- y := x;                 | x -> SZP ; y -> SZP
     --
     evaluate [ Input (Info 1) "x"
-             , If (Info 2) (Not (Eq (Variable "x") (ALiteral 0)))
-                  (Assign (Info 3) "x" (Sub (Variable "x") (ALiteral (1))))
-                  (Assign (Info 4) "x" (Add (Variable "x") (ALiteral (1))))
-             ]
-
-    --
-    -- x := input()             | x -> ST
-    -- if x >= 0 && x = 0 then  | x -> SZ
-    --     x := x - 1;          | x -> SN
-    -- else                     | x -> SNP
-    --     skip;                | x -> SNP
-    -- end                      | x -> SNP
-    --
-    evaluate [ Input (Info 1) "x"
-             , If (Info 2) (And (Or (Gt (Variable "x") (ALiteral 0))
-                                    (Eq (Variable "x") (ALiteral 0)))
-                                (Eq (Variable "x") (ALiteral 0)))
-                  (Assign (Info 3) "x" (Sub (Variable "x") (ALiteral (1))))
-                  (Skip (Info 4))
-             ]
-
-    --
-    -- x := input()             | x -> ST
-    -- if x >= 0 && x = 0 then  | x -> SZ
-    --     x := x - 1;          | x -> SN
-    -- else                     | x -> SNP
-    --     skip;                | x -> SNP
-    -- end                      | x -> SNP
-    --
-    evaluate [ Input (Info 1) "x"
-             , If (Info 2) (And (Or (Gt (Variable "x") (ALiteral 0))
-                                (Eq (Variable "x") (ALiteral 0)))
-                           (Eq (Variable "x") (ALiteral 0)))
-                  (Assign (Info 3) "x" (Sub (Variable "x") (ALiteral (1))))
-                  (Skip (Info 4))
+             , If (Info 2) (Lt (Variable "x") (ALiteral 0))
+                  (Assign (Info 3) "x" (Mult (Variable "x") (ALiteral (-1))))
+                  (Assign (Info 4) "x" (Add (Variable "x") (ALiteral 1)))
              ]
 
     -- Example program, where we verify that a division-by-0 will not occur.
@@ -911,18 +791,23 @@ abstractMain = do
                            (Assign (Info 7)
                                    "x" (Sub (Variable "x") (Variable "b"))))
                       (Assign (Info 8) "x" (ALiteral 1)))
+             -- TODO: invariants currently unsupported post-refactor
              , Invariant (Info 9) (Not (Eq (Variable "x") (ALiteral 0)))
              , Assign (Info 10) "y" (Div (ALiteral 1) (Variable "x"))
              ]
   where
     evaluate commands = do
         let p = foldr (Seq) (Skip (Info 0)) commands
+        putStrLn "Program:"
+        putStrLn $ show p
+
+        putStrLn "Abstract interpretation:"
         case signEvalProgram p of
-            Right interp ->
-                putStrLn $ show interp
-            Left error ->
-                putStrLn $ error
-        putStrLn $ replicate 70 '#'
+            Right s ->
+                putStrLn $ output s
+            Left error -> do
+                putStrLn error
+        putStrLn $ "\n" ++ replicate 70 '#' ++ "\n"
 
 concreteMain :: IO ()
 concreteMain = do
