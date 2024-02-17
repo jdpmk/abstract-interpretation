@@ -634,7 +634,7 @@ instance AbstractDomain Sign where
     aEvalCommand c s = case c of
         Skip i ->
             -- Special case: 
-            Right $ if label i == 0 then s { output = "" } else s
+            Right $ s { output = "" }
         Seq c1 c2 -> do
             s1 <- aEvalCommand c1 s
             s2 <- aEvalCommand c2 s1
@@ -676,8 +676,32 @@ instance AbstractDomain Sign where
         Input _ var ->
             let env0 = env s in
             Right $ log c s { env = putEnv env0 var ST }
-        Invariant _ _ ->
-            undefined
+        Invariant i e -> do
+            let env0 = env s
+            env_when_sat <- aEvalBExp e env0 [] False
+            let env_inv = meetEnv env0 env_when_sat
+            let mismatches = collectMismatches env0 env_inv
+            if null mismatches then
+                Right $ log c s { env = env_inv }
+            else
+                let instances = unlines (map reportMismatch mismatches) in
+                let error = "\n" ++ show c ++ "\n"
+                         ++ "ERROR: unsatisfied invariant:\n"
+                         ++ instances ++ "\n"
+                in Right $ s { success = False
+                             , output = error
+                             }
+          where
+            reportMismatch (var, inv_aval, env_aval) =
+                "requires: " ++ show var ++ " -> " ++ show inv_aval ++ "\n"
+             ++ "found:    " ++ show var ++ " -> " ++ show env_aval
+            mappingsFrom env (var, inv_aval) acc =
+                let env_aval = case getEnv env var of
+                                  Left _ -> inv_aval
+                                  Right env_aval -> env_aval
+                in if le env_aval inv_aval then acc
+                   else (var, inv_aval, env_aval):acc
+            collectMismatches env env_inv = foldr (mappingsFrom env) [] env_inv
       where
         log :: Command -> State Sign -> State Sign
         log c s =
@@ -721,26 +745,26 @@ abstractMain = do
 
     --
     -- x := input()      | x -> ST
+    -- if x >= 0 then    | x -> SZP
+    --     skip;         | x -> SZP
+    -- else              | x -> SN
+    --     x := 1;       | x -> SP
+    -- end               | x -> SZP
+    --
+    evaluate [ Input (Info 1) "x"
+             , If (Info 2) (Or (Gt (Variable "x") (ALiteral 0))
+                               (Eq (Variable "x") (ALiteral 0)))
+                  (Skip (Info 3))
+                  (Assign (Info 4) "x" (ALiteral 1))
+             ]
+
+    --
+    -- x := input()      | x -> ST
     -- if x < 0 then     | x -> SN
     --     x := x * -1;  | x -> SP
     -- else              | x -> SZP
     --     x := x + 1;   | x -> SP
     -- end               | x -> SP
-    --
-    evaluate [ Input (Info 1) "x"
-             , If (Info 2) (Lt (Variable "x") (ALiteral 0))
-                  (Assign (Info 3) "x" (Mult (Variable "x") (ALiteral (-1))))
-                  (Assign (Info 4) "x" (Add (Variable "x") (ALiteral 1)))
-             ]
-
-    --
-    -- x := input()            | x -> ST
-    -- if x > 0 or x = 0 then  | x -> SZP
-    --     skip;               | x -> SZP
-    -- else                    | x -> SN
-    --     x := 1;             | x -> SP
-    -- end                     | x -> SZP
-    -- y := x;                 | x -> SZP ; y -> SZP
     --
     evaluate [ Input (Info 1) "x"
              , If (Info 2) (Lt (Variable "x") (ALiteral 0))
@@ -757,7 +781,8 @@ abstractMain = do
                               "x" (Mult (Variable "x") (ALiteral (-5))))
                       (Assign (Info 6)
                               "x" (Add (Variable "x") (ALiteral 1))))
-             , Assign (Info 7) "y" (Div (ALiteral 1) (Variable "x"))
+             , Invariant (Info 7) (Not (Eq (Variable "x") (ALiteral 0)))
+             , Assign (Info 8) "y" (Div (ALiteral 1) (Variable "x"))
              ]
 
     -- Example program, equivalent to the above, where the Sign domain is not
@@ -775,23 +800,6 @@ abstractMain = do
                            (Assign (Info 7)
                                    "x" (Sub (Variable "x") (Variable "b"))))
                       (Assign (Info 8) "x" (ALiteral 1)))
-             , Assign (Info 9) "y" (Div (ALiteral 1) (Variable "x"))
-             ]
-
-    -- Example program, same as above, with an invariant which fails.
-    evaluate [ Input (Info 1) "x"
-             , If (Info 2) (Gt (Variable "x") (ALiteral 0))
-                  (Seq (Assign (Info 3)
-                               "a" (Mult (Variable "x") (ALiteral 3)))
-                       (Assign (Info 4)
-                               "x" (Sub (Variable "x") (Variable "a"))))
-                  (If (Info 5) (Lt (Variable "x") (ALiteral 0))
-                      (Seq (Assign (Info 6)
-                                   "b" (Mult (Variable "x") (ALiteral 6)))
-                           (Assign (Info 7)
-                                   "x" (Sub (Variable "x") (Variable "b"))))
-                      (Assign (Info 8) "x" (ALiteral 1)))
-             -- TODO: invariants currently unsupported post-refactor
              , Invariant (Info 9) (Not (Eq (Variable "x") (ALiteral 0)))
              , Assign (Info 10) "y" (Div (ALiteral 1) (Variable "x"))
              ]
