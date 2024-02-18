@@ -131,9 +131,9 @@ instance Show Command where
             Input _ var ->
                 ws ++ var ++ " := input();"
             Print _ e ->
-                ws ++ "print " ++ show e
+                ws ++ "print " ++ show e ++ ";"
             Invariant _ e ->
-                ws ++ "invariant " ++ show e
+                ws ++ "invariant " ++ show e ++ ";"
 
 type Program = Command
 
