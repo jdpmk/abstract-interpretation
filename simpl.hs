@@ -395,18 +395,18 @@ instance Lattice Sign where
 -- Abstract interpreter.
 
 data State a = State
-    { success :: Bool
-    , env     :: IEnv a
+    { env     :: IEnv a
     , output  :: String
     , indent  :: Int
     }
 
 type StateOrErr a = Either String (State a)
+type IEnvOrErr a = Either String (IEnv a)
 
 class Lattice a => AbstractDomain a where
     -- TODO: AbstractValueOrErr
     aEvalAExp :: Lattice a => AExp -> IEnv a -> Either String a
-    aEvalBExp :: Lattice a => BExp -> IEnv a -> IEnv a -> Bool -> Either String (IEnv a)
+    aEvalBExp :: Lattice a => BExp -> IEnv a -> Bool -> IEnvOrErr a
     aEvalCommand :: (Show a, Lattice a) => Command -> State a -> StateOrErr a
 
 mergeEnv :: Lattice a => (a -> a -> a) -> IEnv a -> IEnv a -> IEnv a
@@ -562,47 +562,47 @@ instance AbstractDomain Sign where
 
                 (_, _) -> ST
 
-    aEvalBExp e env0 envGuard flipped = case e of
+    aEvalBExp e env flipped = case e of
         BLiteral b ->
-            Right envGuard
-        Not b ->
-            aEvalBExp b env0 envGuard (not flipped)
+            Right env
+        Not e ->
+            aEvalBExp e env (not flipped)
         Or e1 e2 -> do
-            env1 <- aEvalBExp e1 env0 envGuard flipped
-            env2 <- aEvalBExp e2 env0 envGuard flipped
+            env1 <- aEvalBExp e1 env flipped
+            env2 <- aEvalBExp e2 env flipped
             Right $ (if flipped then meetEnv else joinEnv) env1 env2
         And e1 e2 -> do
-            env1 <- aEvalBExp e1 env0 envGuard flipped
-            env2 <- aEvalBExp e2 env0 envGuard flipped
+            env1 <- aEvalBExp e1 env flipped
+            env2 <- aEvalBExp e2 env flipped
             Right $ (if flipped then joinEnv else meetEnv) env1 env2
         -- TODO: Assumption for the comparisons below is that variables are
         -- always on the LHS of the operator.
         Eq e1 e2 -> do
-            a1 <- aEvalAExp e1 env0
-            a2 <- aEvalAExp e2 env0
+            a1 <- aEvalAExp e1 env
+            a2 <- aEvalAExp e2 env
             Right $ case e1 of
-                Variable var -> putEnv envGuard var (deduceEqual a2 flipped)
-                _            -> envGuard
+                Variable var -> putEnv env var (deduceEqual a2 flipped)
+                _            -> env
         Lt e1 e2 ->
             if flipped then
                 let neg_exp = Or (Gt e1 e2) (Eq e1 e2)
-                in aEvalBExp neg_exp env0 envGuard (not flipped)
+                in aEvalBExp neg_exp env (not flipped)
             else do
-                a1 <- aEvalAExp e1 env0
-                a2 <- aEvalAExp e2 env0
+                a1 <- aEvalAExp e1 env
+                a2 <- aEvalAExp e2 env
                 Right $ case e1 of
-                    Variable var -> putEnv envGuard var (deduceLess a2)
-                    _            -> envGuard
+                    Variable var -> putEnv env var (deduceLess a2)
+                    _            -> env
         Gt e1 e2 ->
             if flipped then
                 let neg_exp = Or (Lt e1 e2) (Eq e1 e2)
-                in aEvalBExp neg_exp env0 envGuard (not flipped)
+                in aEvalBExp neg_exp env (not flipped)
             else do
-                a1 <- aEvalAExp e1 env0
-                a2 <- aEvalAExp e2 env0
+                a1 <- aEvalAExp e1 env
+                a2 <- aEvalAExp e2 env
                 Right $ case e1 of
-                    Variable var -> putEnv envGuard var (deduceGreater a2)
-                    _            -> envGuard
+                    Variable var -> putEnv env var (deduceGreater a2)
+                    _            -> env
       where
         deduceLess :: Sign -> Sign
         deduceLess a = case a of
@@ -642,8 +642,8 @@ instance AbstractDomain Sign where
                                ++ (output s2) }
         If _ guard c1 c2 -> do
             let env0 = env s
-            env_when_sat   <- aEvalBExp guard env0 [] False
-            env_when_unsat <- aEvalBExp (Not guard) env0 [] False
+            env_when_sat   <- aEvalBExp guard env0 False
+            env_when_unsat <- aEvalBExp (Not guard) env0 False
             let env_then = meetEnv env0 env_when_sat
             let env_else = meetEnv env0 env_when_unsat
 
@@ -657,10 +657,10 @@ instance AbstractDomain Sign where
 
             Right $ s { env = env_if
                       , output = ws ++ "if " ++ show guard ++ " then\n"
-                              ++ nws ++ showEnv env_when_sat ++ "\n"
+                              ++ nws ++ showEnv env_then ++ "\n"
                               ++ output st
                               ++ ws ++ "else\n"
-                              ++ nws ++ showEnv env_when_unsat ++ "\n"
+                              ++ nws ++ showEnv env_else ++ "\n"
                               ++ output se
                               ++ ws ++ "end\n"
                               ++ ws ++ showEnv env_if ++ "\n"
@@ -678,7 +678,7 @@ instance AbstractDomain Sign where
             Right $ log c s { env = putEnv env0 var ST }
         Invariant i e -> do
             let env0 = env s
-            env_when_sat <- aEvalBExp e env0 [] False
+            env_when_sat <- aEvalBExp e env0 False
             let env_inv = meetEnv env0 env_when_sat
             let mismatches = collectMismatches env0 env_inv
             if null mismatches then
@@ -688,9 +688,7 @@ instance AbstractDomain Sign where
                 let error = "\n" ++ show c ++ "\n"
                          ++ "ERROR: unsatisfied invariant:\n"
                          ++ instances ++ "\n"
-                in Right $ s { success = False
-                             , output = error
-                             }
+                in Right $ s { output = error }
           where
             reportMismatch (var, inv_aval, env_aval) =
                 "requires: " ++ show var ++ " -> " ++ show inv_aval ++ "\n"
@@ -710,8 +708,7 @@ instance AbstractDomain Sign where
                       ++ ws ++ showEnv (env s) ++ "\n" }
 
 initialState :: (AbstractDomain a) => State a
-initialState = State { success = True
-                     , env     = []
+initialState = State { env     = []
                      , output  = ""
                      , indent  = 0
                      }
