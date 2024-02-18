@@ -130,3 +130,19 @@ Some abstract domains it would be useful to support:
 Other desirable features:
 - [X] statically-checked invariant annotations
 - [ ] lexer and parser
+
+### Development
+
+To load the program up in [GHCi](https://wiki.haskell.org/GHC/GHCi):
+
+```sh
+$ ghci simpl.hs
+```
+
+To run the abstract interpretation examples and concrete interpreter,
+respectively:
+
+```sh
+ghci> abstractMain
+ghci> concreteMain
+```
