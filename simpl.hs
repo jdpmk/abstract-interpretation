@@ -42,10 +42,6 @@ width = 4
 
 -- Abstract syntax tree.
 
-data Info = Info
-    { label :: Int
-    } deriving Show
-
 data AExp
     = ALiteral Int
     | Variable Ident
@@ -99,40 +95,40 @@ instance Show BExp where
             show e1 ++ " > " ++ show e2
 
 data Command
-    = Skip Info
+    = Skip
     | Seq Command Command
-    | If Info BExp Command Command
-    | While Info BExp Command
-    | Assign Info Ident AExp
-    | Input Info Ident
-    | Print Info AExp
-    | Invariant Info BExp
+    | If BExp Command Command
+    | While BExp Command
+    | Assign Ident AExp
+    | Input Ident
+    | Print AExp
+    | Invariant BExp
 
 instance Show Command where
     show c =
         aux c 0
       where
         aux c d = let ws = replicate d ' ' in case c of
-            Skip _ ->
+            Skip ->
                 ""
             Seq c1 c2 ->
                 aux c1 d ++ "\n"
              ++ aux c2 d 
-            If _ guard c1 c2 ->
+            If guard c1 c2 ->
                 ws ++ "if " ++ show guard ++ " then\n"
              ++ aux c1 (d + width) ++ "\n"
              ++ ws ++ "else\n"
              ++ aux c2 (d + width) ++ "\n"
              ++ ws ++ "end"
-            While _ _ _ ->
+            While _ _ ->
                 undefined
-            Assign _ var e ->
+            Assign var e ->
                 ws ++ var ++ " := " ++ show e ++ ";"
-            Input _ var ->
+            Input var ->
                 ws ++ var ++ " := input();"
-            Print _ e ->
+            Print e ->
                 ws ++ "print " ++ show e ++ ";"
-            Invariant _ e ->
+            Invariant e ->
                 ws ++ "invariant " ++ show e ++ ";"
 
 type Program = Command
@@ -197,20 +193,20 @@ evalBExp e env = case e of
 -- TODO: Find a better way to handle IO (Either ...).
 evalCommand :: Command -> CEnv -> IO (Either String CEnv)
 evalCommand c env = case c of
-    Skip _ ->
+    Skip ->
         return $ Right env
     Seq c1 c2 -> do
         err_env' <- evalCommand c1 env
         case err_env' of
             Right env' -> evalCommand c2 env'
             left -> return left
-    If _ guard c1 c2 ->
+    If guard c1 c2 ->
         case evalBExp guard env of
             Right guard' ->
                 if guard' then evalCommand c1 env else evalCommand c2 env
             Left error ->
                 return $ Left error
-    While _ cond body ->
+    While cond body ->
         case evalBExp cond env of
             Right cond' ->
                 if cond' then do
@@ -220,22 +216,22 @@ evalCommand c env = case c of
                         left -> return left
                 else return $ Right env
             Left error -> return $ Left error
-    Assign _ var e ->
+    Assign var e ->
         return $ do
             e' <- evalAExp e env
             Right $ putEnv env var e'
-    Input _ var -> do
+    Input var -> do
         input <- getLine
         let input_as_int = read input :: Int
         return $ Right $ putEnv env var input_as_int
-    Print _ e ->
+    Print e ->
         case evalAExp e env of
             Right e' -> do
                 putStrLn $ show e'
                 return $ Right env
             Left error ->
                 return $ Left error
-    Invariant _ _ ->
+    Invariant _ ->
         return $ Right env
 
 evalProgram :: Program -> IO (Maybe String)
@@ -394,18 +390,27 @@ instance Lattice Sign where
 
 -- Abstract interpreter.
 
+--
+-- State of the abstract interpreter at a given command.
+--
+-- Encapsulates the abstract environment, output to be logged at this step
+-- of execution, and the indentation level to be used when logging.
+--
 data State a = State
-    { env     :: IEnv a
-    , output  :: String
-    , indent  :: Int
+    { env    :: IEnv a
+    , output :: String
+    , indent :: Int
     }
 
-type StateOrErr a = Either String (State a)
+--
+-- Some useful type aliases.
+--
+type AbstractValueOrErr a = Either String a
 type IEnvOrErr a = Either String (IEnv a)
+type StateOrErr a = Either String (State a)
 
 class Lattice a => AbstractDomain a where
-    -- TODO: AbstractValueOrErr
-    aEvalAExp :: Lattice a => AExp -> IEnv a -> Either String a
+    aEvalAExp :: Lattice a => AExp -> IEnv a -> AbstractValueOrErr a
     aEvalBExp :: Lattice a => BExp -> IEnv a -> Bool -> IEnvOrErr a
     aEvalCommand :: (Show a, Lattice a) => Command -> State a -> StateOrErr a
 
@@ -565,8 +570,28 @@ instance AbstractDomain Sign where
     aEvalBExp e env flipped = case e of
         BLiteral b ->
             Right env
+        -- We toggle the flipped flag when performing negation. Effectively,
+        -- this is used to emulate DeMorgan's law "locally" at the other
+        -- binary operations (e.g. Or, Lt, etc).
         Not e ->
             aEvalBExp e env (not flipped)
+        -- When performing conjunction/disjunction, we evaluate the
+        -- subexpressions, and then perform either the meet or join of the
+        -- resulting environments.
+        --
+        -- For disjunction, we broaden the possible values that can be taken
+        -- on, for example, in "x > 1 || x = 0". In this case, "x" is SP when
+        -- it is greater than 1, or SZ, when it is equal to 0. So, taking the
+        -- join of SP and SZ yields SZP, which is the most precise abstract
+        -- value we can use here, i.e., after this condition we know that "x"
+        -- must be zero or positive.
+        --
+        -- Conjunction is similar, but we narrow the possible values that can
+        -- be taken on, for example, in "x >= 0 && x = 0". In this case, "x"
+        -- may be SZP when greater than or equal to 0, and SZ when equal to 0.
+        -- Taking the meet of these abstract values yields is SZ, which is the
+        -- most precise abstract value we can use here. This also makes sense
+        -- logically: x >= 0 && x = 0 implies x = 0.
         Or e1 e2 -> do
             env1 <- aEvalBExp e1 env flipped
             env2 <- aEvalBExp e2 env flipped
@@ -575,8 +600,27 @@ instance AbstractDomain Sign where
             env1 <- aEvalBExp e1 env flipped
             env2 <- aEvalBExp e2 env flipped
             Right $ (if flipped then joinEnv else meetEnv) env1 env2
+        -- Boolean comparison operators provide a chance to further refine
+        -- our abstract environment. For instance, suppose we have a boolean
+        -- guard like:
+        --
+        --   if x = 0 then
+        --       ...
+        --
+        -- The evaluation of "x" will result in its current abstract value. We
+        -- can discard this. The evaluation of the literal "0" will result
+        -- in SZ. We want to detect this and update our abstract state for
+        -- "x". In this case, we map "x" to SZ.
+        --
         -- TODO: Assumption for the comparisons below is that variables are
-        -- always on the LHS of the operator.
+        -- always on the LHS of the operator. Technically, the guard can also
+        -- be written as:
+        --
+        --   if 0 = x then
+        --       ...
+        --
+        -- so we need to check whether EITHER side is a variable, not just the
+        -- left-hand side.
         Eq e1 e2 -> do
             a1 <- aEvalAExp e1 env
             a2 <- aEvalAExp e2 env
@@ -604,6 +648,16 @@ instance AbstractDomain Sign where
                     Variable var -> putEnv env var (deduceGreater a2)
                     _            -> env
       where
+        -- These are used to deduce an abstract value for a variable under
+        -- certain conditions. For example,
+        --
+        --   if x < 0: then, 0 -> SZ, and we can deduce x should be SN
+        --   if x > 0: then, 0 -> SZ, and we can deduce x should be SP
+        --
+        -- This doesn't work all the time, for example,
+        --
+        --   if x < 5: then, 5 -> SP, but we can't assign anything more precise
+        --   than ST to "x". It could be negative, zero, or positive.
         deduceLess :: Sign -> Sign
         deduceLess a = case a of
             SZ  -> SN
@@ -632,15 +686,26 @@ instance AbstractDomain Sign where
                 SB -> SB  -- TODO
 
     aEvalCommand c s = case c of
-        Skip i ->
-            -- Special case: 
+        Skip ->
             Right $ s { output = "" }
         Seq c1 c2 -> do
             s1 <- aEvalCommand c1 s
             s2 <- aEvalCommand c2 s1
-            Right $ s2 { output = (output s1)
-                               ++ (output s2) }
-        If _ guard c1 c2 -> do
+            Right $ s2 { output = (output s1) ++ (output s2) }
+        -- Our abstract interpreter differs from our concrete interpreter in
+        -- the fact that we are interested in exploring both branches of
+        -- conditionals, not just the one for which the guard is satisfied.
+        -- So we must evaluate the guard and its negation, and evaluate each
+        -- branch with its respective environment, exhausting cases in which
+        -- the guard was satisfied and unsatisfied. After evaluating both
+        -- branches, we perform the join of the resulting environments.
+        --
+        -- Intuitively, this is like the "union" of all the information we have
+        -- gathered from the branches. Suppose two different executions of the
+        -- program result in two different branches taken. We want to obtain
+        -- abstract values which encapsulates possible values for variables in
+        -- both (all) executions.
+        If guard c1 c2 -> do
             let env0 = env s
             env_when_sat   <- aEvalBExp guard env0 False
             env_when_unsat <- aEvalBExp (Not guard) env0 False
@@ -665,24 +730,26 @@ instance AbstractDomain Sign where
                               ++ ws ++ "end\n"
                               ++ ws ++ showEnv env_if ++ "\n"
                       }
-        While _ _ _ ->
+        While _ _ ->
             undefined
-        Assign _ var e -> do
+        Assign var e -> do
             let env0 = env s
             a <- aEvalAExp e env0
             Right $ log c s { env = putEnv env0 var a }
-        Print _ _ ->
-            Right $ s
-        Input _ var ->
+        Print _ ->
+            Right $ log c s
+        -- User input is entirely arbitrary (i.e. it could be negative, zero,
+        -- or positive).
+        Input var ->
             let env0 = env s in
             Right $ log c s { env = putEnv env0 var ST }
-        Invariant i e -> do
+        Invariant e -> do
             let env0 = env s
             env_when_sat <- aEvalBExp e env0 False
             let env_inv = meetEnv env0 env_when_sat
             let mismatches = collectMismatches env0 env_inv
             if null mismatches then
-                Right $ log c s { env = env_inv }
+                Right $ log c s
             else
                 let instances = unlines (map reportMismatch mismatches) in
                 let error = "\n" ++ show c ++ "\n"
@@ -701,16 +768,18 @@ instance AbstractDomain Sign where
                    else (var, inv_aval, env_aval):acc
             collectMismatches env env_inv = foldr (mappingsFrom env) [] env_inv
       where
-        log :: Command -> State Sign -> State Sign
+        -- Helper which logs the command and environment after executing the
+        -- command. This should be used for all commands, except If, Invariant,
+        -- and (when implemented) While, which implement logging above.
         log c s =
             let ws = replicate (indent s) ' ' in
             s { output = ws ++ show c ++ "\n"
                       ++ ws ++ showEnv (env s) ++ "\n" }
 
 initialState :: (AbstractDomain a) => State a
-initialState = State { env     = []
-                     , output  = ""
-                     , indent  = 0
+initialState = State { env    = []
+                     , output = ""
+                     , indent = 0
                      }
 
 signEvalProgram :: Program -> StateOrErr Sign
@@ -719,15 +788,15 @@ signEvalProgram p = aEvalCommand p initialState
 abstractMain :: IO ()
 abstractMain = do
     --
-    -- x := y;   | ERROR: unknown "y"
+    -- x := y;  | ERROR: unknown "y"
     --
-    evaluate [ Assign (Info 1) "x" (Variable "y")
+    evaluate [ Assign "x" (Variable "y")
              ]
 
     --
-    -- x := 1;   | x -> SP
+    -- x := 1;  | x -> SP
     --
-    evaluate [ Assign (Info 1) "x" (ALiteral 1)
+    evaluate [ Assign "x" (ALiteral 1)
              ]
 
     --
@@ -735,24 +804,24 @@ abstractMain = do
     -- y := 1;   | x -> SN ; y -> SP
     -- x := y;   | x -> SP ; y -> SP
     --
-    evaluate [ Assign (Info 1) "x" (ALiteral (-1))
-             , Assign (Info 2) "y" (ALiteral (1))
-             , Assign (Info 3) "x" (Variable "y")
+    evaluate [ Assign "x" (ALiteral (-1))
+             , Assign "y" (ALiteral (1))
+             , Assign "x" (Variable "y")
              ]
 
     --
-    -- x := input()      | x -> ST
-    -- if x >= 0 then    | x -> SZP
-    --     skip;         | x -> SZP
-    -- else              | x -> SN
-    --     x := 1;       | x -> SP
-    -- end               | x -> SZP
+    -- x := input()    | x -> ST
+    -- if x >= 0 then  | x -> SZP
+    --     skip;       | x -> SZP
+    -- else            | x -> SN
+    --     x := 1;     | x -> SP
+    -- end             | x -> SZP
     --
-    evaluate [ Input (Info 1) "x"
-             , If (Info 2) (Or (Gt (Variable "x") (ALiteral 0))
-                               (Eq (Variable "x") (ALiteral 0)))
-                  (Skip (Info 3))
-                  (Assign (Info 4) "x" (ALiteral 1))
+    evaluate [ Input "x"
+             , If (Or (Gt (Variable "x") (ALiteral 0))
+                      (Eq (Variable "x") (ALiteral 0)))
+                  (Skip)
+                  (Assign "x" (ALiteral 1))
              ]
 
     --
@@ -763,46 +832,48 @@ abstractMain = do
     --     x := x + 1;   | x -> SP
     -- end               | x -> SP
     --
-    evaluate [ Input (Info 1) "x"
-             , If (Info 2) (Lt (Variable "x") (ALiteral 0))
-                  (Assign (Info 3) "x" (Mult (Variable "x") (ALiteral (-1))))
-                  (Assign (Info 4) "x" (Add (Variable "x") (ALiteral 1)))
+    evaluate [ Input "x"
+             , If (Lt (Variable "x") (ALiteral 0))
+                  (Assign "x" (Mult (Variable "x") (ALiteral (-1))))
+                  (Assign "x" (Add (Variable "x") (ALiteral 1)))
              ]
 
     -- Example program, where we verify that a division-by-0 will not occur.
-    evaluate [ Input (Info 1) "x"
-             , If (Info 2) (Gt (Variable "x") (ALiteral 0))
-                  (Assign (Info 3) "x" (Mult (Variable "x") (ALiteral (-2))))
-                  (If (Info 4) (Lt (Variable "x") (ALiteral 0))
-                      (Assign (Info 5)
+    -- The outputs for analyzing the programs below can be found in the README
+    -- example.
+    evaluate [ Input "x"
+             , If (Gt (Variable "x") (ALiteral 0))
+                  (Assign "x" (Mult (Variable "x") (ALiteral (-2))))
+                  (If (Lt (Variable "x") (ALiteral 0))
+                      (Assign
                               "x" (Mult (Variable "x") (ALiteral (-5))))
-                      (Assign (Info 6)
+                      (Assign
                               "x" (Add (Variable "x") (ALiteral 1))))
-             , Invariant (Info 7) (Not (Eq (Variable "x") (ALiteral 0)))
-             , Assign (Info 8) "y" (Div (ALiteral 1) (Variable "x"))
+             , Invariant (Not (Eq (Variable "x") (ALiteral 0)))
+             , Assign "y" (Div (ALiteral 1) (Variable "x"))
              ]
 
     -- Example program, equivalent to the above, where the Sign domain is not
     -- precise enough to determine that a division-by-0 will certainly not
     -- occur.
-    evaluate [ Input (Info 1) "x"
-             , If (Info 2) (Gt (Variable "x") (ALiteral 0))
-                  (Seq (Assign (Info 3)
+    evaluate [ Input "x"
+             , If (Gt (Variable "x") (ALiteral 0))
+                  (Seq (Assign
                                "a" (Mult (Variable "x") (ALiteral 3)))
-                       (Assign (Info 4)
+                       (Assign
                                "x" (Sub (Variable "x") (Variable "a"))))
-                  (If (Info 5) (Lt (Variable "x") (ALiteral 0))
-                      (Seq (Assign (Info 6)
+                  (If (Lt (Variable "x") (ALiteral 0))
+                      (Seq (Assign
                                    "b" (Mult (Variable "x") (ALiteral 6)))
-                           (Assign (Info 7)
+                           (Assign
                                    "x" (Sub (Variable "x") (Variable "b"))))
-                      (Assign (Info 8) "x" (ALiteral 1)))
-             , Invariant (Info 9) (Not (Eq (Variable "x") (ALiteral 0)))
-             , Assign (Info 10) "y" (Div (ALiteral 1) (Variable "x"))
+                      (Assign "x" (ALiteral 1)))
+             , Invariant (Not (Eq (Variable "x") (ALiteral 0)))
+             , Assign "y" (Div (ALiteral 1) (Variable "x"))
              ]
   where
     evaluate commands = do
-        let p = foldr (Seq) (Skip (Info 0)) commands
+        let p = foldr Seq Skip commands
         putStrLn "Program:"
         putStrLn $ show p
 
@@ -829,19 +900,19 @@ concreteMain = do
     -- print x;
     --
     let commands =
-         [ Input (Info 0) "x"
-         , While (Info 0) (Not (Eq (Variable "x") (ALiteral 1)))
-                 (Seq (Print (Info 0) (Variable "x"))
-                      (If (Info 0) (Eq (Mod (Variable "x") (ALiteral 2))
+         [ Input "x"
+         , While (Not (Eq (Variable "x") (ALiteral 1)))
+                 (Seq (Print (Variable "x"))
+                      (If (Eq (Mod (Variable "x") (ALiteral 2))
                                        (ALiteral 0))
-                          (Assign (Info 0)
+                          (Assign
                                   "x" (Div (Variable "x") (ALiteral 2)))
-                          (Assign (Info 0)
+                          (Assign
                                   "x" (Add (Mult (ALiteral 3) (Variable "x"))
                                            (ALiteral 1)))))
-         , Print (Info 0) (Variable "x")
+         , Print (Variable "x")
          ]
-    let p = foldr Seq (Skip (Info 0)) commands
+    let p = foldr Seq Skip commands
     -- Input:
     -- 42
     --
