@@ -128,5 +128,5 @@ Some abstract domains it would be useful to support:
 - [ ] intervals
 
 Other desirable features:
-- [ ] statically-checked inline annotations
+- [X] statically-checked invariant annotations
 - [ ] lexer and parser
