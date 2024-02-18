@@ -2,36 +2,117 @@
 
 An implementation of [abstract interpretation](https://en.wikipedia.org/wiki/Abstract_interpretation),
 a static analysis method which can be used to prove certain properties of a
-program by performing an interpretation of the program over an abstract domain.
+program by interpreting the program over an abstract domain. Abstract
+interpretation computes an over-approximation of the states any concrete
+execution of the program may reach.
 
 ### Example
 
-The following is an example of abstract interpretation of a program over the
-sign domain, which shows that division-by-0 will not occur.
+Given the following program, we are interested in showing that a division-by-0
+will not occur:
 
 ```
-x := input()
+x := input();
+if x > 0 then
+    x := x * -2;
+else
+    if x < 0 then
+        x := x * -5;
+    else
+        x := x + 1;
+    end
+end
+invariant !(x = 0);
+y := 1 / x;
+```
+
+Below is the abstract interpretation of the program over the sign domain:
+
+```
+x := input();
 { "x" -> ST }
 if x > 0 then
     { "x" -> SP }
-    x := x * -2
+    x := x * -2;
     { "x" -> SN }
 else
     { "x" -> SNZ }
     if x < 0 then
         { "x" -> SN }
-        x := x * -5
+        x := x * -5;
         { "x" -> SP }
     else
         { "x" -> SZ }
-        x := x + 1
+        x := x + 1;
         { "x" -> SP }
     end
     { "x" -> SP }
 end
 { "x" -> SNP }
-y := 1 / x
+invariant !(x = 0);
+{ "x" -> SNP }
+y := 1 / x;
 { "y" -> SNP ; "x" -> SNP }
+```
+
+The invariant above passes, proving that x is nonzero before the division
+is performed.
+
+Note that this domain is not always completely precise. Consider the following
+program, equivalent to the program above:
+
+```
+x := input();
+if x > 0 then
+    a := x * 3;
+    x := x - a;
+else
+    if x < 0 then
+        b := x * 6;
+        x := x - b;
+    else
+        x := 1;
+    end
+end
+invariant !(x = 0);
+y := 1 / x;
+```
+
+The analysis fails to prove the invariant with this program:
+
+```
+x := input();
+{ "x" -> ST }
+if x > 0 then
+    { "x" -> SP }
+    a := x * 3;
+    { "a" -> SP ; "x" -> SP }
+    x := x - a;
+    { "x" -> ST ; "a" -> SP }
+else
+    { "x" -> SNZ }
+    if x < 0 then
+        { "x" -> SN }
+        b := x * 6;
+        { "b" -> SN ; "x" -> SN }
+        x := x - b;
+        { "x" -> ST ; "b" -> SN }
+    else
+        { "x" -> SZ }
+        x := 1;
+        { "x" -> SP }
+    end
+    { "x" -> ST }
+end
+{ "x" -> ST }
+
+invariant !(x = 0);
+ERROR: unsatisfied invariant:
+requires: "x" -> SNP
+found:    "x" -> ST
+
+y := 1 / x;
+{ "y" -> SB ; "x" -> ST }
 ```
 
 ### Features
