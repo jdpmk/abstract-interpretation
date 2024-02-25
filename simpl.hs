@@ -684,13 +684,9 @@ instance AbstractDomain Sign where
             if not flipped then a
             else case a of
                 ST -> SB  -- TODO
-                SZP -> SN
-                SNP -> SZ
-                SNZ -> SP
-                SP -> SNZ
-                SZ -> SNP
-                SN -> SZP
                 SB -> SB  -- TODO
+                SZ -> SNP
+                _  -> ST
 
     aEvalCommand c s = case c of
         Skip ->
@@ -932,6 +928,18 @@ abstractMain = do
     evaluate [ Assign "x" (ALiteral 5)
              , While (Gt (Variable "x") (ALiteral 0))
                      (Assign "x" (Sub (Variable "x") (ALiteral 1)))
+             ]
+
+    -- x := input()
+    -- if !(x = 1) then
+    --     x := x
+    -- else
+    --     skip
+    -- end
+    evaluate [ Input "x"
+             , If (Not (Eq (Variable "x") (ALiteral 1)))
+                  (Assign "x" (Variable "x"))
+                  (Skip)
              ]
   where
     evaluate commands = do
