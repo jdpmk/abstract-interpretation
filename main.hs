@@ -66,9 +66,11 @@ abstractMain = do
                   (Assign "x" (Add (Variable "x") (ALiteral 1)))
              ]
 
+    --
     -- Example program, where we verify that a division-by-0 will not occur.
     -- The outputs for analyzing the programs below can be found in the README
     -- example.
+    --
     evaluate [ Input "x"
              , If (Gt (Variable "x") (ALiteral 0))
                   (Assign "x" (Mult (Variable "x") (ALiteral (-2))))
@@ -81,9 +83,11 @@ abstractMain = do
              , Assign "y" (Div (ALiteral 1) (Variable "x"))
              ]
 
+    --
     -- Example program, equivalent to the above, where the Sign domain is not
     -- precise enough to determine that a division-by-0 will certainly not
     -- occur.
+    --
     evaluate [ Input "x"
              , If (Gt (Variable "x") (ALiteral 0))
                   (Seq (Assign
@@ -100,12 +104,14 @@ abstractMain = do
              , Assign "y" (Div (ALiteral 1) (Variable "x"))
              ]
 
-    -- x := input()
-    -- i := 0
-    -- while (i < x) do
-    --     print x;
-    --     i := i + 1;
-    -- done
+    --
+    -- x := input()      | x -> ST            | one more iteration for
+    -- i := 0            | x -> ST ; i -> SZ  | fixed-point convergence
+    -- while (i < x) do  | x -> ST ; i -> SZ  | x -> ST ; i -> SP
+    --     print x;      | x -> ST ; i -> SZ  | x -> ST ; i -> SP
+    --     i := i + 1;   | x -> ST ; i -> SP  | x -> ST ; i -> SP
+    -- done              | x -> ST ; i -> SZP |
+    --
     evaluate [ Input "x"
              , Assign "i" (ALiteral 0)
              , While (Lt (Variable "i") (Variable "x"))
@@ -113,21 +119,25 @@ abstractMain = do
                           (Assign "i" (Add (Variable "i") (ALiteral 1))))
              ]
 
-    -- x := 5
-    -- while x > 0 do
-    --     x := x - 1;
-    -- done
+    --
+    -- x := 5           | x -> SP
+    -- while x > 0 do   | x -> SP
+    --     x := x - 1;  | x -> ST
+    -- done             | x -> ST
+    --
     evaluate [ Assign "x" (ALiteral 5)
              , While (Gt (Variable "x") (ALiteral 0))
                      (Assign "x" (Sub (Variable "x") (ALiteral 1)))
              ]
 
-    -- x := input()
-    -- if !(x = 1) then
-    --     x := x
-    -- else
-    --     skip
-    -- end
+    --
+    -- x := input()      | x -> ST
+    -- if !(x = 1) then  | x -> ST
+    --     x := x        | x -> ST
+    -- else              | x -> SP
+    --     skip          | x -> SP
+    -- end               | x -> ST
+    --
     evaluate [ Input "x"
              , If (Not (Eq (Variable "x") (ALiteral 1)))
                   (Assign "x" (Variable "x"))

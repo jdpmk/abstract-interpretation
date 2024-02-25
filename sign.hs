@@ -119,8 +119,6 @@ instance Lattice Sign where
 
         (_, _) -> SB
 
-
-
 instance AbstractDomain Sign where
     aEvalAExp e env = case e of
         -- Evaluation of a literal is simple: from its value, we can easily

@@ -78,6 +78,12 @@ type StateOrErr a = Either String (State a)
 --
 -- Helpers for environments of lattice elements.
 --
+
+--
+-- Given two abstract environments of lattice elements:
+-- * when identifier x is in both environments    => f env1[x] env2[x]
+-- * otherwise, when x is in just one environment => env[x]
+--
 mergeEnv :: Lattice a => (a -> a -> a) -> IEnv a -> IEnv a -> IEnv a
 mergeEnv f env1 env2 = foldr (mergeMapping f env1) [] env2
   where
@@ -99,6 +105,7 @@ joinEnv = mergeEnv join
 meetEnv :: Lattice a => IEnv a -> IEnv a -> IEnv a
 meetEnv = mergeEnv meet
 
+-- TODO: Maybe this can be more efficient but it's concise and intuitive.
 equalEnv :: (Eq a, Lattice a) => IEnv a -> IEnv a -> Bool
 equalEnv env1 env2 = contains env1 env2 && contains env2 env1
   where
