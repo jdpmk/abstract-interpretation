@@ -9,15 +9,16 @@ execution of the program may reach.
 ### Example
 
 Given the following program, we are interested in showing that a division-by-0
-will not occur:
+will not occur. This is encoded by the invariant, which is statically checked
+before runtime.
 
 ```
 x := input();
 if x > 0 then
-    x := x * -2;
+    x := x * -4;
 else
     if x < 0 then
-        x := x * -5;
+        x := x * -8;
     else
         x := x + 1;
     end
@@ -26,20 +27,35 @@ invariant !(x = 0);
 y := 1 / x;
 ```
 
-Below is the abstract interpretation of the program over the sign domain:
+We can use the sign abstract domain (see [sign.hs](https://github.com/jdpmk/abstract-interpretation/blob/master/sign.hs))
+to prove this. This domain is the powerset of the signs, $\mathcal{P}(\{ -, 0, + \})$:
+- `-/0/+` (`ST`, or "Top", $\top$, representing any integer)
+- `0/+`   (`SZP`)
+- `-/+`   (`SNP`)
+- `-/0`   (`SNZ`)
+- `+`     (`SP`)
+- `0`     (`SZ`)
+- `-`     (`SN`)
+- `?`     (`SB`, or "Bottom", $\bot$, representing an error state)
+
+See `resources/sign.png` for a visualization.
+
+By "proving" this domain is a partial order and lattice, and implementing
+three functions for interpreting statements of the language, we can execute
+this program over this domain:
 
 ```
 x := input();
 { "x" -> ST }
 if x > 0 then
     { "x" -> SP }
-    x := x * -2;
+    x := x * -4;
     { "x" -> SN }
 else
     { "x" -> SNZ }
     if x < 0 then
         { "x" -> SN }
-        x := x * -5;
+        x := x * -8;
         { "x" -> SP }
     else
         { "x" -> SZ }
@@ -58,17 +74,17 @@ y := 1 / x;
 The invariant above passes, proving that x is nonzero before the division
 is performed.
 
-Note that this domain is not always completely precise. Consider the following
+Note that this domain is cannot always be 100% precise. Consider the following
 program, equivalent to the program above:
 
 ```
 x := input();
 if x > 0 then
-    a := x * 3;
+    a := x * 5;
     x := x - a;
 else
     if x < 0 then
-        b := x * 6;
+        b := x * 9;
         x := x - b;
     else
         x := 1;
@@ -85,7 +101,7 @@ x := input();
 { "x" -> ST }
 if x > 0 then
     { "x" -> SP }
-    a := x * 3;
+    a := x * 5;
     { "a" -> SP ; "x" -> SP }
     x := x - a;
     { "x" -> ST ; "a" -> SP }
@@ -93,7 +109,7 @@ else
     { "x" -> SNZ }
     if x < 0 then
         { "x" -> SN }
-        b := x * 6;
+        b := x * 9;
         { "b" -> SN ; "x" -> SN }
         x := x - b;
         { "x" -> ST ; "b" -> SN }
