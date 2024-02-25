@@ -1,0 +1,32 @@
+digraph sign {
+    
+    graph [fontname = "Courier New"];
+    node [fontname = "Courier New"];
+    edge [fontname = "Courier New"];
+
+    rankdir="BT"
+    edge [dir = forward arrowhead = open]
+    splines=false
+
+    ST [label = "-/0/+ | ST"];
+
+    SNZ [label = "-/0 | SNZ"];
+    SNP [label = "-/+ | SNP"];
+    SZP [label = "0/+ | SZP"];
+    
+    SN [label = "- | SN"];
+    SZ [label = "0 | SZ"];
+    SP [label = "+ | SP"];
+    
+    SB [label = "? | SB"];
+
+    SZP -> {ST}
+    SNP -> {ST}
+    SNZ -> {ST}
+
+    SP -> {SNP, SZP}
+    SZ -> {SNZ, SZP}
+    SN -> {SNZ, SNP}
+    
+    SB -> {SP, SZ, SN}
+}
