@@ -120,8 +120,10 @@ instance Show Command where
              ++ ws ++ "else\n"
              ++ aux c2 (d + width) ++ "\n"
              ++ ws ++ "end"
-            While _ _ ->
-                undefined
+            While cond body ->
+                ws ++ "while " ++ show cond ++ " do\n"
+             ++ aux body (d + width) ++ "\n"
+             ++ ws ++ "done"
             Assign var e ->
                 ws ++ var ++ " := " ++ show e ++ ";"
             Input var ->
@@ -285,7 +287,7 @@ class PartialOrd a => Lattice a where
 -- A useful application of this abstract domain is proving the absence of a
 -- division-by-0.
 --
-data Sign = ST | SZP | SNP | SNZ | SP | SZ | SN | SB deriving Show
+data Sign = ST | SZP | SNP | SNZ | SP | SZ | SN | SB deriving (Show, Eq)
 
 instance PartialOrd Sign where
     le x y = case (x, y) of
@@ -409,7 +411,7 @@ type AbstractValueOrErr a = Either String a
 type IEnvOrErr a = Either String (IEnv a)
 type StateOrErr a = Either String (State a)
 
-class Lattice a => AbstractDomain a where
+class (Eq a, Lattice a) => AbstractDomain a where
     aEvalAExp :: Lattice a => AExp -> IEnv a -> AbstractValueOrErr a
     aEvalBExp :: Lattice a => BExp -> IEnv a -> Bool -> IEnvOrErr a
     aEvalCommand :: (Show a, Lattice a) => Command -> State a -> StateOrErr a
@@ -434,6 +436,11 @@ joinEnv = mergeEnv join
 
 meetEnv :: Lattice a => IEnv a -> IEnv a -> IEnv a
 meetEnv = mergeEnv meet
+
+equalEnv :: (Eq a, Lattice a) => IEnv a -> IEnv a -> Bool
+equalEnv env1 env2 = contains env1 env2 && contains env2 env1
+  where
+    contains a b = List.intersect a b == a
 
 instance AbstractDomain Sign where
     aEvalAExp e env = case e of
@@ -730,8 +737,41 @@ instance AbstractDomain Sign where
                               ++ ws ++ "end\n"
                               ++ ws ++ showEnv env_if ++ "\n"
                       }
-        While _ _ ->
-            undefined
+        While cond body -> do
+            aux s s 0
+              where
+                aux s_curr s_prev i = do
+                    let env0 = env s_curr
+                    env_when_sat <- aEvalBExp cond env0 False
+                    let env_loop = meetEnv env0 env_when_sat
+
+                    let si = s_curr { indent = width + indent s_curr }
+                    sb <- aEvalCommand body $ si { env = env_loop }
+
+                    let env_sb = env sb
+                    let env_prev = env s_prev
+                    -- TODO: widenEnv for infinite height lattices
+                    let env_widen = joinEnv env_sb env_prev
+
+                    -- If it's the first iteration, let's always do at least
+                    -- one more iteration.
+                    --
+                    -- Once we have completed at least one previous iteration,
+                    -- apply widening, and terminate when the abstract values
+                    -- have not changed.
+                    if i == 0 || not (equalEnv env_sb env_widen) then
+                        aux s_curr { env = env_sb } sb (i + 1)
+                    else
+                        let env_while = joinEnv (env s) env_sb in
+                        let ws = replicate (indent s_curr) ' ' in
+                        let nws = replicate (width + indent s_curr) ' ' in
+                        Right $ sb
+                              { output = ws ++ "while " ++ show cond ++ " do\n"
+                                      ++ nws ++ showEnv env_loop ++ "\n"
+                                      ++ output sb
+                                      ++ ws ++ "done\n"
+                                      ++ ws ++ showEnv env_while ++ "\n"
+                              }
         Assign var e -> do
             let env0 = env s
             a <- aEvalAExp e env0
@@ -770,7 +810,7 @@ instance AbstractDomain Sign where
       where
         -- Helper which logs the command and environment after executing the
         -- command. This should be used for all commands, except If, Invariant,
-        -- and (when implemented) While, which implement logging above.
+        -- and While, which implement logging above.
         log c s =
             let ws = replicate (indent s) ' ' in
             s { output = ws ++ show c ++ "\n"
@@ -870,6 +910,28 @@ abstractMain = do
                       (Assign "x" (ALiteral 1)))
              , Invariant (Not (Eq (Variable "x") (ALiteral 0)))
              , Assign "y" (Div (ALiteral 1) (Variable "x"))
+             ]
+
+    -- x := input()
+    -- i := 0
+    -- while (i < x) do
+    --     print x;
+    --     i := i + 1;
+    -- done
+    evaluate [ Input "x"
+             , Assign "i" (ALiteral 0)
+             , While (Lt (Variable "i") (Variable "x"))
+                     (Seq (Print (Variable "x"))
+                          (Assign "i" (Add (Variable "i") (ALiteral 1))))
+             ]
+
+    -- x := 5
+    -- while x > 0 do
+    --     x := x - 1;
+    -- done
+    evaluate [ Assign "x" (ALiteral 5)
+             , While (Gt (Variable "x") (ALiteral 0))
+                     (Assign "x" (Sub (Variable "x") (ALiteral 1)))
              ]
   where
     evaluate commands = do
