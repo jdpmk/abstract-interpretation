@@ -133,10 +133,17 @@ Other desirable features:
 
 ### Development
 
+To build an executable with [GHC](https://www.haskell.org/ghc/):
+
+```sh
+$ ghc main.hs
+$ ./main
+```
+
 To load the program up in [GHCi](https://wiki.haskell.org/GHC/GHCi):
 
 ```sh
-$ ghci simpl.hs
+$ ghci main.hs
 ```
 
 To run the abstract interpretation examples and concrete interpreter,
