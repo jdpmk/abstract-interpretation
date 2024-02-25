@@ -73,10 +73,10 @@ abstractMain = do
     --
     evaluate [ Input "x"
              , If (Gt (Variable "x") (ALiteral 0))
-                  (Assign "x" (Mult (Variable "x") (ALiteral (-2))))
+                  (Assign "x" (Mult (Variable "x") (ALiteral (-4))))
                   (If (Lt (Variable "x") (ALiteral 0))
                       (Assign
-                              "x" (Mult (Variable "x") (ALiteral (-5))))
+                              "x" (Mult (Variable "x") (ALiteral (-8))))
                       (Assign
                               "x" (Add (Variable "x") (ALiteral 1))))
              , Invariant (Not (Eq (Variable "x") (ALiteral 0)))
@@ -91,12 +91,12 @@ abstractMain = do
     evaluate [ Input "x"
              , If (Gt (Variable "x") (ALiteral 0))
                   (Seq (Assign
-                               "a" (Mult (Variable "x") (ALiteral 3)))
+                               "a" (Mult (Variable "x") (ALiteral 5)))
                        (Assign
                                "x" (Sub (Variable "x") (Variable "a"))))
                   (If (Lt (Variable "x") (ALiteral 0))
                       (Seq (Assign
-                                   "b" (Mult (Variable "x") (ALiteral 6)))
+                                   "b" (Mult (Variable "x") (ALiteral 9)))
                            (Assign
                                    "x" (Sub (Variable "x") (Variable "b"))))
                       (Assign "x" (ALiteral 1)))
