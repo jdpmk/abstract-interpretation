@@ -28,7 +28,7 @@ y := 1 / x;
 ```
 
 We can use the sign abstract domain (see [sign.hs](https://github.com/jdpmk/abstract-interpretation/blob/master/sign.hs))
-to prove this. This domain is the powerset of the signs, $\mathcal{P}(\{ -, 0, + \})$:
+to prove this. This domain is the powerset of the signs, $\mathcal{P}(\\{ -, 0, + \\})$:
 - `-/0/+` (`ST`, or "Top", $\top$, representing any integer)
 - `0/+`   (`SZP`)
 - `-/+`   (`SNP`)
@@ -40,9 +40,9 @@ to prove this. This domain is the powerset of the signs, $\mathcal{P}(\{ -, 0, +
 
 See `resources/sign.png` for a visualization.
 
-By "proving" this domain is a partial order and lattice, and implementing
-three functions for interpreting statements of the language, we can execute
-this program over this domain:
+By showing this domain is a partial order and lattice, and implementing
+functions for interpreting expressions and statements of the language, we can
+execute this program over this domain:
 
 ```
 x := input();
@@ -74,7 +74,7 @@ y := 1 / x;
 The invariant above passes, proving that x is nonzero before the division
 is performed.
 
-Note that this domain is cannot always be 100% precise. Consider the following
+Note that this domain cannot always be 100% precise. Consider the following
 program, equivalent to the program above:
 
 ```
