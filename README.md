@@ -6,6 +6,30 @@ program by interpreting the program over an abstract domain. Abstract
 interpretation computes an over-approximation of the states any concrete
 execution of the program may reach.
 
+### Theory
+
+More formally, given:
+- lattices $C$, $\subseteq_C$ and $A$, $\subseteq_A$, representing the
+  concrete and abstract domain, respectively
+- abstraction function $\alpha : C \to A$, and concretization function
+  $\gamma : A \to C$, where $\alpha, \gamma$ are monotonic
+
+we have a [Galois connection](https://en.wikipedia.org/wiki/Galois_connection),
+if
+
+$\forall a \in A, c \in C. \alpha(c) \subseteq_A a \iff c \subseteq_C \gamma(a)$
+
+which means $\alpha(c)$ is the most precise approximation of concrete value
+$c \in C$ and $\gamma(a)$ is the least precise concrete element which can be
+correctly approximated by abstract value $a \in A$.
+
+See [this diagram](https://github.com/jdpmk/abstract-interpretation/blob/master/resources/galois.gif)
+for a visualization.
+
+References:
+- [Introduction to Abstract Interpretation, Bruno Blanchet](https://bblanche.gitlabpages.inria.fr/absint.pdf)
+- [Abstract Interpretation, Susan B. Horwitz](https://pages.cs.wisc.edu/~horwitz/CS704-NOTES/10.ABSTRACT-INTERPRETATION.html)
+
 ### Example
 
 Given the following program, we are interested in showing that a division-by-0
@@ -38,7 +62,8 @@ to prove this. This domain is the powerset of the signs, $\mathcal{P}(\\{ -, 0, 
 - `-`     (`SN`)
 - `?`     (`SB`, or "Bottom", $\bot$, representing an error state)
 
-See `resources/sign.png` for a visualization.
+See [this diagram](https://github.com/jdpmk/abstract-interpretation/blob/master/resources/sign.png)
+for a visualization.
 
 By showing this domain is a partial order and lattice, and implementing
 functions for interpreting expressions and statements of the language, we can
